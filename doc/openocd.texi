@@ -7359,6 +7359,49 @@ The AVR 8-bit microcontrollers from Atmel integrate flash memory.
 @comment - defines mass_erase ... pointless given flash_erase_address
 @end deffn
 
+@deffn {Flash Driver} {tc3x_eflash}
+@deffnx {Flash Driver} {tc4x_eflash}
+The Infineon AURIX TC3x and TC4x microcontrollers integrate program flash
+(PFLASH) and data flash (DFLASH), both driven by the same flash controller.
+The driver reads the device geometry from the chip identification register and
+derives the sector layout itself, so the sector layout given to
+@command{flash bank} is ignored. The size is not ignored: the driver rejects
+a bank whose size is not the one the part actually has, because the geometry
+it derives would then not match the declared bank.
+
+@example
+flash bank $_CHIPNAME.pflash0 tc3x_eflash 0x80000000 0x300000 0 0 $_TARGETNAME
+@end example
+
+Program flash is visible twice: segment 8 is the cached alias and segment A
+the non-cached alias of the same physical memory. Declare the bank once, then
+expose the second view with the @code{virtual} driver. Declaring the same
+physical flash twice with @code{tc3x_eflash} gives each bank its own sector
+state, which diverges as soon as one alias is erased.
+
+@example
+flash bank $_CHIPNAME.pflash0_nc virtual 0xa0000000 0 0 0 \
+           $_TARGETNAME $_CHIPNAME.pflash0
+@end example
+
+By default programming is performed by a helper algorithm downloaded to target
+RAM, which requires a work area to be configured. Where that is not possible
+the driver can fall back to writing each flash page directly over the debug
+connection, which works without a work area but is considerably slower.
+
+@deffn {Command} {aurix_eflash fallback} bank [on|off]
+Query or set fallback mode for @var{bank}. With no argument the current setting
+is reported.
+@end deffn
+
+@quotation Note
+Reading erased flash raises an uncorrectable ECC error on the SRI bus which
+latches an error flag in the debug access path. Until it is cleared, every
+subsequent read returns zero. The driver detects this condition and recovers
+from it, but a debugger that bypasses the driver may observe the stale zeroes.
+@end quotation
+@end deffn
+
 @deffn {Flash Driver} {bluenrg-x}
 STMicroelectronics BlueNRG-1, BlueNRG-2 and BlueNRG-LP/LPS Bluetooth low energy wireless system-on-chip. They include ARM Cortex-M0/M0+ core and internal flash memory.
 The driver automatically recognizes these chips using
