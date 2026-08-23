@@ -1,0 +1,63 @@
+AURIX blinky examples
+=====================
+
+Minimal bare-metal LED-blink images for three Infineon AURIX Lite Kits,
+used to check end to end that OpenOCD can erase, program and verify the
+program flash of an AURIX device, and that the programmed image really
+runs from a cold boot with no debugger attached. Each board variant also
+doubles as the firmware image for the shared hardware regression suite
+in common/.
+
+    tc27x/    AURIX TC275 Lite Kit  (TC2x family)
+    tc375/    AURIX TC375 Lite Kit  (TC3x family)
+    tc4d7/    AURIX TC4D7 Lite Kit  (TC4x family)
+    common/   Hardware regression suite shared by all three boards
+
+See each subfolder's own README for that board's build, flash and notes.
+Start with tc375/README for the most heavily commented walk-through
+(the first board this support was brought up on); the other two READMEs
+focus on what differs for their family.
+
+If a board stops responding or shows a fault LED, see RECOVERY.md and
+recover-board.sh in this directory -- a self-contained runbook/script to
+get it back to a known-good, blinking state using only this repo's own
+OpenOCD build.
+
+Hardware regression suite
+--------------------------
+
+common/test-aurix-hardware.cfg is a single OpenOCD-script suite that
+exercises memory access, flash erase/program/verify, reset/halt/resume/
+step, breakpoints, watchpoints and sustained transfers against real
+hardware, then finishes by programming that family's blinky image and
+sampling the port register to confirm the LEDs really alternate.
+Sections 1-17 are family-neutral; running it against the TC2x or TC4x
+kits instead of its native TC375 needs a thin per-family wrapper that
+sets a handful of documented overrides (TARGET, PFLASH_BANKS, flash test
+address, DMU register offsets, and so on) and then sources the shared
+file:
+
+    common/test-aurix-hardware.cfg          native TC375 suite
+    common/test-aurix-hardware-tc2x.cfg     TC2x (TC275) wrapper
+    common/test-aurix-hardware-tc4d7.cfg    TC4x (TC4D7) wrapper
+
+Each wrapper's own header comment documents exactly which overrides it
+sets and why, including hardware-confirmed register addresses and the
+Infineon manual sections they were cross-checked against. Run a suite
+from inside common/, e.g.:
+
+    openocd -f board/infineon/kit_a2g_tc375_lite.cfg \
+            -f test-aurix-hardware.cfg
+
+    openocd -f board/infineon/kit_a1g_tc275_lite.cfg \
+            -f test-aurix-hardware-tc2x.cfg
+
+    openocd -f board/infineon/kit_a3g_tc4d7_lite.cfg \
+            -f test-aurix-hardware-tc4d7.cfg
+
+Each check prints PASS or FAIL, the suite prints a final tally and exits
+non zero if anything failed, so it can be used directly as a pass/fail
+gate. It is deliberately not wired into "make check": it needs a
+specific board attached over USB, so it must never run as part of an
+ordinary build. The hardware-free tests for the AURIX support live in
+testing/tcl_commands and do run under "make check".

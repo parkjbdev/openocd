@@ -1,0 +1,86 @@
+AURIX TC375 blinky
+==================
+
+A minimal bare-metal image for the Infineon AURIX TC375 Lite Kit V2,
+used to check end to end that OpenOCD can erase, program and verify the
+program flash of an AURIX device, and that the programmed image really
+runs from a cold boot with no debugger attached.
+
+CPU0 alternates LED1 (P00.5) and LED2 (P00.6) at about 1 Hz.
+
+Building
+--------
+
+Any TriCore ELF GCC works. Point CROSS_COMPILE at it:
+
+    make CROSS_COMPILE=/path/to/bin/tricore-elf-
+
+Flashing
+--------
+
+    openocd -f board/infineon/kit_a2g_tc375_lite.cfg \
+            -c "program tc375-blinky.elf verify reset exit"
+
+or simply
+
+    make CROSS_COMPILE=... flash
+
+The kit carries an on-board miniWiggler V3 probe, so no external debug
+hardware is needed. Interface 0 (FTDI channel A) carries the DAP protocol
+that OpenOCD claims directly over libusb; interface 1 (channel B) is a
+plain UART bridge to the target and is meant to stay bound to ftdi_sio.
+On some kernels ftdi_sio also binds interface 0 as a tty, which then
+makes OpenOCD's libusb_claim_interface() fail. contrib/60-openocd.rules
+already unbinds ftdi_sio from interface 0 on hotplug; if it is not
+installed, do it once by hand before running OpenOCD:
+
+    echo '<bus>-<port>:1.0' > /sys/bus/usb/drivers/ftdi_sio/unbind
+
+After "reset exit" OpenOCD releases the target and the LEDs start
+blinking. Power cycling the board must keep them blinking; if they stop,
+the image was programmed but is not running from cold boot.
+
+Hardware regression suite
+-------------------------
+
+../common/test-aurix-hardware.cfg is a regression suite for the
+AURIX support that runs against the same kit. It covers memory access
+across widths and alignments, flash erase, program and verify through
+both the algorithm and the work-area-less fallback, reset, halt, resume
+and single step, hardware breakpoints, data and range watchpoints, error
+handling on faulted accesses, and sustained transfers that stress the
+DAP response decoder. It finishes by running this image and sampling the
+port register to confirm the LEDs really alternate.
+
+Build the image first, then:
+
+    openocd -f board/infineon/kit_a2g_tc375_lite.cfg \
+            -f ../common/test-aurix-hardware.cfg
+
+Each check prints PASS or FAIL, the suite prints a final tally and exits
+non zero if anything failed, so it can be used directly as a pass/fail
+gate. It is plain OpenOCD script with no external dependencies, so it
+runs on every host OpenOCD builds for.
+
+It is deliberately not wired into "make check", because it needs this
+specific board and must never run as part of an ordinary build. The
+hardware-free tests for the AURIX support live in testing/tcl_commands
+and do run under "make check".
+
+Notes
+-----
+
+The image is linked at 0xa0000000, the non-cached alias of program flash
+bank 0, because that is where the factory default boot mode header in
+the UCB points the reset vector. The TC375 board configuration declares
+the physical bank in the cached alias and exposes the non-cached alias
+with OpenOCD's "virtual" flash driver, so no address translation is
+needed when programming and both views share one sector state.
+
+The watchdogs are disabled in the reset handler before anything else
+happens. The TC3xx boots with the CPU and safety watchdogs armed with a
+window of roughly 128 ms, so an application that does not service them
+resets the device long before the first LED transition is visible. This
+is easy to miss during development, because an attached debugger
+suspends the watchdogs and the same image then runs correctly after
+"reset halt" followed by "resume".

@@ -71,6 +71,7 @@ Doxyfile
 libtool
 Makefile
 !contrib/loaders/**/Makefile
+!testing/examples/**/Makefile
 stamp-h1
 stamp-vti
 INSTALL
@@ -115,3 +116,9 @@ GTAGS
 # A compile_commands.json can be generated using bear and will help tools such
 # as clangd to locate header files and use correct $CFLAGS
 compile_commands.json
+testing/tcl_commands/*.log
+testing/tcl_commands/*.trs
+
+# Infineon examples for hardware test
+testing/examples/aurix-blinky/tc375/*.elf
+testing/examples/aurix-blinky/tc375/*.map
