@@ -139,6 +139,14 @@ ATTRS{idVendor}=="04d9", ATTRS{idProduct}=="8052", MODE="660", GROUP="plugdev", 
 # Infineon DAP miniWiggler v3
 ATTRS{idVendor}=="058b", ATTRS{idProduct}=="0043", MODE="660", GROUP="plugdev", TAG+="uaccess"
 
+# Interface 0 (channel A) carries the DAP protocol and must be claimed by
+# OpenOCD over libusb. On some miniWiggler units/kernels ftdi_sio also binds
+# this interface as a tty, which then makes libusb_claim_interface() fail;
+# force it back off. Interface 1 (channel B, UART) is left alone.
+ACTION=="add", SUBSYSTEM=="usb", ATTRS{idVendor}=="058b", ATTRS{idProduct}=="0043", \
+ENV{DEVTYPE}=="usb_interface", ATTR{bInterfaceNumber}=="00", \
+RUN+="/bin/sh -c 'echo %k > /sys/bus/usb/drivers/ftdi_sio/unbind'"
+
 # Qualcomm Embedded USB Debugger (EUD)
 ATTRS{idVendor}=="05c6", ATTRS{idProduct}=="9501", MODE="660", GROUP="plugdev", TAG+="uaccess"
 ATTRS{idVendor}=="05c6", ATTRS{idProduct}=="9502", MODE="660", GROUP="plugdev", TAG+="uaccess"
