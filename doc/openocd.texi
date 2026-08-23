@@ -4065,7 +4065,8 @@ ARM ADIv5 Debug Access Port that shares the same acronym.
 
 Debug transactions are not carried by a JTAG scan chain but by the On-Chip
 Memory Transaction Service (OCMTS), which performs reads and writes on the
-on-chip buses on behalf of the debugger.
+on-chip buses on behalf of the debugger. @xref{tricorechapter,,TriCore
+Architecture}.
 
 The Infineon DAP transport is selected with the command
 @command{transport select ifxdap}.
@@ -5292,6 +5293,8 @@ And two debug interfaces cores:
 @item @code{riscv} -- a RISC-V core.
 @item @code{stm8} -- implements an STM8 core.
 @item @code{testee} -- a dummy target for cases without a real CPU, e.g. CPLD.
+@item @code{tricore} -- an Infineon AURIX TriCore core, accessed over the
+Infineon DAP transport. @xref{tricorechapter,,TriCore Architecture}.
 @item @code{xscale} -- this is actually an architecture,
 not a CPU type. It is based on the ARMv5 architecture.
 @item @code{xtensa} -- this is a generic Cadence/Tensilica Xtensa core.
@@ -12508,6 +12511,50 @@ STMicroelectronics, based on a proprietary 8-bit core architecture.
 
 OpenOCD supports debugging STM8 through the STMicroelectronics debug
 protocol SWIM, @pxref{swimtransport,,SWIM}.
+
+@anchor{tricorechapter}
+@section TriCore Architecture
+@uref{https://www.infineon.com/aurix, AURIX} is a family of automotive
+microcontrollers from Infineon Technologies built around the 32-bit TriCore
+core. Debug access is not provided over JTAG or SWD but over the Infineon
+Device Access Port (DAP), @pxref{ifxdaptransport,,Infineon DAP}.
+
+A TriCore target is reached through an On-Chip Memory Transaction Service
+(OCMTS) instance, which carries the debug transactions to the SRI bus and to
+the core special function registers. One OCMTS instance is shared by all cores
+of a device; create it first and then create one @code{tricore} target per
+core.
+
+@deffn {Config Command} {ocmts create} name -chain-position tapname
+Creates an OCMTS access object called @var{name} attached to the TAP named
+@var{tapname}.
+@end deffn
+
+@deffn {Config Command} {ocmts init}
+Initialises all previously created OCMTS instances. This is called
+automatically by @command{init} and rarely needs to be issued by hand.
+@end deffn
+
+A TriCore target is created with the usual @command{target create} command and
+takes an additional mandatory option:
+
+@deffn {Config Command} {-ocmts} name
+Selects the OCMTS instance @var{name} through which this core is accessed.
+@end deffn
+
+The @code{-coreid} option selects which TriCore core of the device the target
+refers to. Core 0 is the boot core.
+
+Example for a two-core device:
+@example
+ocmts create $_CHIPNAME.ocmts -chain-position $_CHIPNAME.cpu
+target create $_CHIPNAME.cpu0 tricore -ocmts $_CHIPNAME.ocmts -coreid 0
+target create $_CHIPNAME.cpu1 tricore -ocmts $_CHIPNAME.ocmts -coreid 1
+@end example
+
+Breakpoints are implemented with the OCDS trigger unit, which provides eight
+trigger entries per core. Software breakpoints are not supported, so the number
+of simultaneously active breakpoints is limited by the hardware.
 
 @section Xtensa Architecture
 

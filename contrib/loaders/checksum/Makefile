@@ -14,11 +14,22 @@ RISCV_OBJCOPY ?= $(RISCV_CROSS_COMPILE)objcopy
 RISCV32_CFLAGS = -march=rv32e -mabi=ilp32e -nostdlib -nostartfiles -Os -fPIC
 RISCV64_CFLAGS = -march=rv64i -mabi=lp64 -nostdlib -nostartfiles -Os -fPIC
 
-all:	arm riscv
+TRICORE_CROSS_COMPILE ?= tricore-elf-
+TRICORE_CC      ?= $(TRICORE_CROSS_COMPILE)gcc
+TRICORE_OBJCOPY ?= $(TRICORE_CROSS_COMPILE)objcopy
+# CRC32.B and CRC32L.W are TriCore 1.6.2 instructions.  The helper is linked
+# flat at address zero because OpenOCD copies it into a work area at runtime.
+TRICORE_AFLAGS = -mtc162 -nostdlib -nostartfiles -T tricore-flat.ld
+
+.PHONY: all arm riscv tricore clean
+
+all:	arm riscv tricore
 
 arm: armv4_5_crc.inc armv7m_crc.inc
 
 riscv:	riscv32_crc.inc riscv64_crc.inc
+
+tricore: tricore.inc
 
 armv4_5_%.elf: armv4_5_%.s
 	$(ARM_AS) $(ARM_AFLAGS) $< -o $@
@@ -43,6 +54,12 @@ riscv64_%.elf:	riscv_%.c
 
 riscv%.bin:	riscv%.elf
 	$(RISCV_OBJCOPY) -Obinary $< $@
+
+tricore.elf:	tricore.s tricore-flat.ld
+	$(TRICORE_CC) $(TRICORE_AFLAGS) $< -o $@
+
+tricore.bin:	tricore.elf
+	$(TRICORE_OBJCOPY) -Obinary $< $@
 
 clean:
 	-rm -f *.elf *.bin *.inc

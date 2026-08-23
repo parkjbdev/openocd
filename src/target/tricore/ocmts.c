@@ -253,24 +253,21 @@ int ocmts_init(struct ocmts *ocmts)
 {
 	int err;
 	uint32_t pat0 = 0xA1, pat1 = 0x5E, ostate;
-	uint32_t oec_addr = 0xF0000478;
-	uint32_t ostate_addr = 0xF0000480;
 	/* aurix_tap_device_type(), not tap->idcode directly: the ifxdap transport
 	 * never scans a real IDCODE, so tap->idcode is always 0 and testing it
 	 * would make the TC4x branch below permanently unreachable. */
 	uint32_t dev_type = aurix_tap_device_type(ocmts->tap);
+	enum aurix_family family = aurix_family_of(dev_type);
+	uint32_t oec_addr, ostate_addr;
 
-	if (aurix_device_is_tc4x(dev_type)) {
-		oec_addr = 0xFA180068;
-		ostate_addr = 0xFA18006C;
-	}
+	aurix_ocmts_registers(family, &oec_addr, &ostate_addr);
 
 	/* Report which OCMTS register pair was selected and why, so that a zero
 	 * OSTATE does not have to be diagnosed by inference. */
 	LOG_INFO("[OCMTS] tap idcode=0x%08" PRIx32 " dev_type=0x%08" PRIx32
-		 " tc4x=%s -> OEC=0x%08" PRIx32 " OSTATE=0x%08" PRIx32,
-		 ocmts->tap->idcode, dev_type,
-		 aurix_device_is_tc4x(dev_type) ? "yes" : "no",
+		 " family=%s tc4x=%s -> OEC=0x%08" PRIx32 " OSTATE=0x%08" PRIx32,
+		 ocmts->tap->idcode, dev_type, aurix_family_name(family),
+		 family == AURIX_FAMILY_TC4XX ? "yes" : "no",
 		 oec_addr, ostate_addr);
 
 	/* A zero OSTATE here is not evidence of a wedged client: on a device

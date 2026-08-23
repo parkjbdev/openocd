@@ -110,6 +110,7 @@ static struct target_type *target_types[] = {
 	&riscv_target,
 	&stm8_target,
 	&testee_target,
+	&tricore_target,
 	&xscale_target,
 	&xtensa_chip_target,
 };
@@ -5970,6 +5971,11 @@ COMMAND_HANDLER(handle_target_create)
 				command_print(CMD, "-dap ?name? required when creating target");
 				retval = ERROR_COMMAND_ARGUMENT_INVALID;
 			}
+		} else if (target->has_ocmts) {
+			if (!target->ocmts_configured) {
+				command_print(CMD, "-ocmts ?name? required when creating target");
+				retval = ERROR_COMMAND_ARGUMENT_INVALID;
+			}
 		} else {
 			if (!target->tap_configured) {
 				command_print(CMD, "-tap ?name? required when creating target");
@@ -5983,6 +5989,7 @@ COMMAND_HANDLER(handle_target_create)
 
 	if (retval != ERROR_OK) {
 		rtos_destroy(target);
+		free(target->cmd_name);
 		free(target->gdb_port_override);
 		free(target->trace_info);
 		free(target->type);
@@ -6158,6 +6165,10 @@ COMMAND_HANDLER(handle_target_smp)
 		struct target_list *new = create_target_list_node(CMD_ARGV[i]);
 		if (new)
 			list_add_tail(&new->lh, lh);
+	}
+	if (list_empty(lh)) {
+		free(lh);
+		return ERROR_OK;
 	}
 	struct target_list *curr;
 	foreach_smp_target(curr, lh) {
