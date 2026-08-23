@@ -4052,6 +4052,29 @@ virtual SWIM TAP through the command @command{swim newtap basename tap_type}.
 The TAP definition must precede the target definition command
 @command{target create target_name stm8 -tap basename.tap_type}.
 
+@anchor{ifxdaptransport}
+@subsection Infineon DAP Transport
+@cindex ifxdap
+@cindex Infineon DAP
+@cindex DAP, Infineon
+The Device Access Port (DAP) is the proprietary debug protocol used by the
+Infineon AURIX family of automotive microcontrollers. It uses one clock wire
+and can support one, two, or three data wires. This driver currently supports
+only the two-wire mode (one clock and one data wire). It is unrelated to the
+ARM ADIv5 Debug Access Port that shares the same acronym.
+
+Debug transactions are not carried by a JTAG scan chain but by the On-Chip
+Memory Transaction Service (OCMTS), which performs reads and writes on the
+on-chip buses on behalf of the debugger.
+
+The Infineon DAP transport is selected with the command
+@command{transport select ifxdap}.
+
+As with SWIM, the concept of TAPs does not fit the protocol, but the current SW
+model of OpenOCD requires a virtual TAP to be defined through the command
+@command{ifxdap newtap basename tap_type}. The TAP definition must precede the
+OCMTS and target definitions.
+
 @anchor{jtagspeed}
 @section JTAG Speed
 JTAG clock setup is part of system setup.

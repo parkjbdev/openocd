@@ -24,6 +24,7 @@ include %D%/drivers/Makefile.am
 	%D%/commands.h \
 	%D%/interface.h \
 	%D%/interfaces.h \
+	%D%/ifxdap.h \
 	%D%/minidriver.h \
 	%D%/jtag.h \
 	%D%/swd.h \
