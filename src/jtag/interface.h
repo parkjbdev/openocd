@@ -375,6 +375,9 @@ struct adapter_driver {
 
 	/* Infineon DAP APIs */
 	const struct ifxdap_driver *ifxdap_ops;
+
+	/* Infineon OCMTS APIs */
+	const struct ocmts_ops *ocmts_ops;
 };
 
 int adapter_resets(int assert_trst, int assert_srst);
