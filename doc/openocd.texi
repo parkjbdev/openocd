@@ -7481,6 +7481,41 @@ from it, but a debugger that bypasses the driver may observe the stale zeroes.
 @end quotation
 @end deffn
 
+@deffn {Flash Driver} {tc2x_eflash}
+First generation Infineon AURIX TC2x (TC27x/TC29x) devices drive program flash
+(PFLASH) and data flash (DFLASH) with the same kind of flash controller as
+TC3x, but a different command set. As with @code{tc3x_eflash}, the driver
+reads the device geometry from the chip identification register and derives
+the sector layout itself, so the sector layout given to @command{flash bank}
+is ignored. The size is not ignored: the driver rejects a bank whose size is
+not the one the part actually has, because the geometry it derives would then
+not match the declared bank. TC2x program flash banks are 2 MiB each.
+
+@example
+flash bank $_CHIPNAME.pflash0 tc2x_eflash 0x80000000 0x200000 0 0 $_TARGETNAME
+@end example
+
+Program flash is visible twice, as a cached and a non-cached alias of the same
+physical memory, and is declared the same way as for TC3x: declare the bank
+once in the cached alias and expose the second view with the @code{virtual}
+driver.
+
+@example
+flash bank $_CHIPNAME.pflash0_nc virtual 0xa0000000 0 0 0 \
+           $_TARGETNAME $_CHIPNAME.pflash0
+@end example
+
+DFLASH1 is owned by the HSM on these parts and is not supported. UCB
+programming is not supported either; for banks whose state the driver cannot
+read, protection is reported as unknown rather than guessed.
+
+@quotation Note
+Writing DFLASH0 and DFLASH1 also requires the ENDINIT safety-protection
+sequence around the controller registers, which the driver queues through the
+OCMTS transaction service rather than issuing as direct register accesses.
+@end quotation
+@end deffn
+
 @deffn {Flash Driver} {bluenrg-x}
 STMicroelectronics BlueNRG-1, BlueNRG-2 and BlueNRG-LP/LPS Bluetooth low energy wireless system-on-chip. They include ARM Cortex-M0/M0+ core and internal flash memory.
 The driver automatically recognizes these chips using

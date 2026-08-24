@@ -11,12 +11,21 @@ TRICORE_OBJCOPY ?= $(TRICORE_CROSS_COMPILE)objcopy
 TRICORE_CFLAGS  = -mtc162 -O3 -ffreestanding -nostdlib -fomit-frame-pointer \
 		  -Wall -Wextra -fno-unroll-loops -nostartfiles -T tricore-flat.ld
 
-all: tc3x-pflash-program.inc tc3x-dflash-program.inc \
+all: tc2x-pflash-program.inc tc2x-dflash-program.inc \
+	tc3x-pflash-program.inc tc3x-dflash-program.inc \
 	tc4x-pflash-program.inc tc4x-dflash-program.inc \
 	tc4x-pflashcs-program.inc tc4x-dflashcs-program.inc \
 	tc3x-wdt-disable.inc
 
 .PHONY: all clean
+
+# TC2x eFlash helper: same C source, built once per bank kind. TC2x has a
+# single host command interface, so no CS (checker-core) variants exist.
+tc2x-pflash-program.elf: aurix-flash-program.c tc2x-flash.h errors.h tricore-mmio.h tricore-flat.ld
+	$(TRICORE_CC) $(TRICORE_CFLAGS) -DTC2X_FLASH_PFLASH $< -o $@
+
+tc2x-dflash-program.elf: aurix-flash-program.c tc2x-flash.h errors.h tricore-mmio.h tricore-flat.ld
+	$(TRICORE_CC) $(TRICORE_CFLAGS) -DTC2X_FLASH_DFLASH $< -o $@
 
 # TC3x eFlash helper: same C source, built once per bank kind. TC3x has a
 # single host command interface, so no CS (checker-core) variants exist.

@@ -4,15 +4,15 @@
  */
 
 /*
- * eFlash programming helper for Infineon AURIX TC3x/TC4x program and
+ * eFlash programming helper for Infineon AURIX TC2x/TC3x/TC4x program and
  * data flash (PFLASH/DFLASH, including UCB, which is programmed through
  * the DFLASH command sequence).
  *
  * The host cannot write eFlash directly: it feeds the destination address
  * and page-sized chunks of data through a command/status register
  * interface (HOST_CMD_ADDR and friends, see
- * tc3x-flash.h/tc4x-flash.h), one "enter page mode, stream
- * data, issue write" cycle per page. TC3x has a single such
+ * tc2x-flash.h/tc3x-flash.h/tc4x-flash.h), one "enter page mode, stream
+ * data, issue write" cycle per page. TC2x and TC3x each have a single such
  * interface; TC4x has two (host and CSRM/checker-core), and separate
  * pflash/dflash command codes and status bits besides.
  *
@@ -28,27 +28,31 @@
  * write pointer for new data, so the host can stream a buffer much larger
  * than the work area while programming is in progress.
  *
- * Built for six variants selected at compile time: TC3x PFLASH/DFLASH, and
- * TC4x PFLASH/DFLASH/PFLASHCS/DFLASHCS (the "CS" pair uses the second,
- * CSRM-side command interface). See tc3x-flash.h, tc4x-flash.h and the
- * Makefile in this directory.
+ * Built for eight variants selected at compile time: TC2x PFLASH/DFLASH,
+ * TC3x PFLASH/DFLASH, and TC4x PFLASH/DFLASH/PFLASHCS/DFLASHCS (the "CS"
+ * pair uses the second, CSRM-side command interface). See tc2x-flash.h,
+ * tc3x-flash.h, tc4x-flash.h and the Makefile in this directory.
  *
- * TC3x PFLASH writes are additionally protected by Safety ENDINIT (a
- * safety-critical register write-protection mechanism); tc3x_safety_endinit()
- * below briefly lifts it for the write command sequence and restores it
- * immediately after. DFLASH is not ENDINIT-protected, so it does not call
- * that helper - this is a genuine hardware asymmetry, not an omission. TC4x
- * has no equivalent protection on either flash type.
+ * TC2x and TC3x PFLASH writes are additionally protected by Safety ENDINIT
+ * (a safety-critical register write-protection mechanism); tc2x_safety_
+ * endinit()/tc3x_safety_endinit() below briefly lift it for the write
+ * command sequence and restore it immediately after. DFLASH is not
+ * ENDINIT-protected on either family, so it does not call either helper -
+ * this is a genuine hardware asymmetry between the two, not an omission.
+ * TC4x has no equivalent protection on either flash type.
  *
  * Restyled from the reference implementation published by Christoph Seitz
  * in tricore-oss-openocd (contrib/loaders/flash/aurix/), which replaced
  * this project's earlier tc3x-program.S/tc4x-program.S - hand written
  * assembly reconstructed from a pre-built loader blob shipped without
- * source. The command/status register offsets below were independently
- * confirmed against this project's own register-level "fallback" write
- * path in src/flash/nor/aurix_eflash.c, which predates this file and was
- * derived from Infineon's public register description rather than from
- * either loader.
+ * source (this project never had a TC2x loader of its own, hand written
+ * or otherwise, so there was nothing to replace for that family - this is
+ * simply new support). The command/status register offsets below were
+ * independently confirmed against this project's own register-level
+ * "fallback" write path in src/flash/nor/aurix_eflash.c, which predates
+ * this file and was derived from Infineon's public register description
+ * rather than from either loader; TC2x is not yet wired into that driver,
+ * so only the TC3x/TC4x offsets could be cross-checked this way.
  */
 
 #include <stdbool.h>
@@ -56,28 +60,56 @@
 
 #include "errors.h"
 
-#if defined(TC3X_FLASH_PFLASH) || defined(TC3X_FLASH_DFLASH)
+#if defined(TC2X_FLASH_PFLASH) || defined(TC2X_FLASH_DFLASH)
+#include "tc2x-flash.h"
+#elif defined(TC3X_FLASH_PFLASH) || defined(TC3X_FLASH_DFLASH)
 #include "tc3x-flash.h"
 #elif defined(TC4X_FLASH_PFLASH) || defined(TC4X_FLASH_DFLASH) || \
 	defined(TC4X_FLASH_PFLASHCS) || defined(TC4X_FLASH_DFLASHCS)
 #include "tc4x-flash.h"
 #else
-#error "no flash bank selected, see tc3x-flash.h / tc4x-flash.h"
+#error "no flash bank selected, see tc2x-flash.h / tc3x-flash.h / tc4x-flash.h"
+#endif
+
+#if defined(TC2X_FLASH_PFLASH)
+/*
+ * Briefly lift (endinit=0) or restore (endinit=1) ENDINIT write protection
+ * around the page write command sequence, using the documented two-step
+ * password toggle on TC2X_WDTS_CON0. Returns 0 on success, or a synthetic
+ * BIT(28) error code if the register never reflects the requested state.
+ */
+static inline uint32_t __attribute__((always_inline))
+tc2x_safety_endinit(uint32_t endinit)
+{
+	const uint32_t value = mmio_read_u32(TC2X_WDTS_CON0_ADDR);
+
+	mmio_write_u32(TC2X_WDTS_CON0_ADDR, (value & 0xFFFFFF00u) | (~value & 0xFCu) | 0x01u);
+	mmio_write_u32(TC2X_WDTS_CON0_ADDR, (value & 0xFFFFFF00u) | (~value & 0xFCu) | 0x02u | endinit);
+
+	for (uint32_t i = 0; i < 100000u; i++) {
+		if ((mmio_read_u32(TC2X_WDTS_CON0_ADDR) & 1u) == endinit)
+			return 0;
+	}
+
+	return BIT(28);
+}
 #endif
 
 #if defined(TC3X_FLASH_PFLASH)
 /*
  * Briefly lift (endinit=0) or restore (endinit=1) Safety ENDINIT write
- * protection around the page write command sequence, using the
- * Password+Modify Access step values (0xF1/0xF2) confirmed for TC3x's
- * WDTSCON0 - see TC3X_ENDINIT_PW_STEP1/STEP2/SET in
+ * protection around the page write command sequence. Same purpose as
+ * tc2x_safety_endinit() above, but using the Password+Modify Access step
+ * values (0xF1/0xF2) confirmed for TC3x's WDTSCON0 rather than TC2x's
+ * (0x01/0x02) - see TC3X_ENDINIT_PW_STEP1/STEP2/SET in
  * src/flash/nor/aurix_eflash.c, which this mirrors. Required per
  * AURIX_TC3xx_Part1_UserManual.pdf section 6.3.1, "Safety Endinit
  * protection": "All command sequences that can modify PFLASH content are
  * protected by Safety Endinit. A PROER is generated if there is an access
  * to the PFLASH without removal of Safety Endinit protection." - a
  * requirement independent of, and in addition to, any watchdog
- * disable/service state. TC3x DFLASH is not ENDINIT-protected.
+ * disable/service state. TC3x DFLASH is not ENDINIT-protected, same
+ * asymmetry as TC2x.
  */
 static inline uint32_t __attribute__((always_inline))
 tc3x_safety_endinit(uint32_t endinit)
@@ -203,9 +235,14 @@ main(void *buffer_start, uint32_t buffer_size, uintptr_t addr, uint32_t size)
 		clear_status();
 #endif
 
-#if defined(TC3X_FLASH_PFLASH)
-		/* PFLASH write commands are ENDINIT-protected on TC3x; DFLASH is not
-		 * protected. See tc3x_safety_endinit()'s comment. */
+#if defined(TC2X_FLASH_PFLASH)
+		/* PFLASH write commands are ENDINIT-protected on TC2x; DFLASH is not. */
+		ret = tc2x_safety_endinit(0u);
+		if (ret)
+			goto out;
+#elif defined(TC3X_FLASH_PFLASH)
+		/* Same ENDINIT protection on TC3x PFLASH; DFLASH is not protected
+		 * either. See tc3x_safety_endinit()'s comment. */
 		ret = tc3x_safety_endinit(0u);
 		if (ret)
 			goto out;
@@ -218,7 +255,11 @@ main(void *buffer_start, uint32_t buffer_size, uintptr_t addr, uint32_t size)
 		mmio_write_u32(HOST_CMD_ADDR + 0xAAA8u, FLASH_WRITE_CMD(burst_mode));
 		mmio_barrier();
 
-#if defined(TC3X_FLASH_PFLASH)
+#if defined(TC2X_FLASH_PFLASH)
+		ret = tc2x_safety_endinit(1u);
+		if (ret)
+			goto out;
+#elif defined(TC3X_FLASH_PFLASH)
 		ret = tc3x_safety_endinit(1u);
 		if (ret)
 			goto out;

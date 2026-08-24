@@ -57,6 +57,8 @@ struct aurix_eflash_bank {
 	uint8_t page_bit;
 	/** Bank probed */
 	bool probed;
+	/** TC2 eflash */
+	bool tc2x;
 	/** TC4 eflash */
 	bool tc4x;
 	/** DFLASH */
@@ -162,7 +164,65 @@ static const uint32_t tc3x_pflash_size_kb[16] = {
 	5120, 6144, 7168, 8192, 10240, 12288, 14336, 16384,
 };
 
-/* Burst program command used by the write algorithm (TC3x/TC4x). */
+/* --- TC2x (first generation AURIX) -------------------------------------
+ *
+ * TC2x differs from TC3x/TC4x in three ways that matter to this driver:
+ *
+ *  1. It has a single command sequencer for every bank (HOST_CMD_ADDR,
+ *     0xAF000000) instead of one per flash module, and a single 32 bit
+ *     FSR that carries the busy/state bits AND the error bits in the same
+ *     word. There is no separate error register, and no FSI.
+ *  2. The FSR error bits sit at completely different positions from TC3x:
+ *     bits 11/12/13 and 25/26 rather than bits 0..6. Everything else in
+ *     the word is state, not error, so the error value must be masked
+ *     before it is interpreted or the busy bits read as errors.
+ *  3. PFLASH writes are protected by ENDINIT and must be issued with it
+ *     temporarily lifted, via the two-step password toggle on WDTS_CON0.
+ *     DFLASH writes are not, and erase is not.
+ *
+ * All addresses and masks below are corroborated by
+ * contrib/loaders/flash/aurix/tc2x-flash.h, which was written independently
+ * of any flash driver and implements the on-target loader for this same
+ * part. Where a value could not be corroborated that way, or could not be
+ * confirmed on silicon, the comment says so and the driver is written to
+ * avoid depending on it.
+ */
+
+/* Flash status register. One word: busy bits 1..6, PROG 7, ERASE 8,
+ * page-mode-ready 9 (PFLASH) / 10 (DFLASH), errors 11,12,13,25,26. */
+#define TC2X_FSR 0xF8002010
+/* Banked form for the ocmts register helpers. FSR = base + 0x1010, and
+ * because status and error are the same word they share one offset. */
+#define TC2X_REG_BASE 0xF8001000
+#define TC2X_FSR_OFFSET 0x1010
+/* Bits of the FSR that are errors. Identical to FSR_ERRORS in tc2x-flash.h. */
+#define TC2X_FSR_ERRORS (BIT(11) | BIT(12) | BIT(13) | BIT(25) | BIT(26))
+/* Busy bits, identical to TC2X_STATUS_BUSY_* in tc2x-flash.h. Note the gap
+ * at bit 0: there is no "DFLASH0 busy" at bit 0. The upstream reference
+ * implementation assumes there is, and is off by one for both data flash
+ * banks; see tc2x_busy_bit_for(). */
+#define TC2X_STATUS_BUSY_DFLASH0 BIT(1)
+#define TC2X_STATUS_BUSY_DFLASH1 BIT(2)
+#define TC2X_STATUS_BUSY_PFLASH0 BIT(3)
+#define TC2X_STATUS_BUSY_PFLASH1 BIT(4)
+#define TC2X_STATUS_BUSY_PFLASH2 BIT(5)
+#define TC2X_STATUS_BUSY_PFLASH3 BIT(6)
+/* Page-mode-ready bit, per flash type. */
+#define TC2X_PAGE_READY_PFLASH BIT(9)
+#define TC2X_PAGE_READY_DFLASH BIT(10)
+/* Base of program flash on TC2x. Each program flash bank is 2 MiB and they
+ * are numbered upwards from here, which is how pflash_index is derived. */
+#define TC2X_PFLASH_BASE 0x80000000
+/* Safety watchdog timer control register, used to toggle ENDINIT. */
+#define TC2X_WDTS_CON0 0xF00360F0
+/* Chip identification fields unique to TC2x. */
+#define SCU_CHIPID_CHID 0xF000
+#define SCU_CHIPID_CHID_TC27X 0x7000
+#define SCU_CHIPID_CHID_TC29X 0x9000
+/* CHTEC (bits 7:6) distinguishes the families: 0x40 is TC2x, 0x80 is TC3x. */
+#define SCU_CHIPID_CHTEC_TC2X 0x40
+/* Burst program command. TC2x uses 0x7A where TC3x/TC4x use 0xA6. */
+#define TC2X_FLASH_WRITE_BURST_CMD 0x7A
 #define TC3X_FLASH_WRITE_BURST_CMD 0xA6
 
 /* Rejects a bank that does not fit into the program flash the device reports.
@@ -627,6 +687,177 @@ static int tc3x_eflash_auto_probe(struct flash_bank *bank)
 	return tc3x_eflash_probe(bank);
 }
 
+/* Logical sector sizes of a TC2x program flash bank, in ascending address
+ * order. Eight 16 KiB, eight 32 KiB, four 64 KiB, three 128 KiB and four
+ * 256 KiB sectors, which is exactly 2 MiB.
+ *
+ * This is the one PFLASH geometry value in the driver that is NOT confirmed
+ * on silicon. Two independent sources agree on it: the upstream reference
+ * driver, and the fact that the sequence must sum to the bank size, so a
+ * wrong size in the table would immediately overflow or under-fill the bank
+ * and the probe below would truncate. It is also consistent with the board's
+ * own factory image, which ends 24 KiB into the bank: the first sector is
+ * 16 KiB, so that is a whole sector plus half of the second.
+ *
+ * phfls_sector_count() guards the table length so that a future part with a
+ * smaller bank cannot index past the end of the array. */
+static const uint32_t tc2x_pflash_sector_sizes[] = {
+	16 * 1024, 16 * 1024, 16 * 1024, 16 * 1024,
+	16 * 1024, 16 * 1024, 16 * 1024, 16 * 1024,
+	32 * 1024, 32 * 1024, 32 * 1024, 32 * 1024,
+	32 * 1024, 32 * 1024, 32 * 1024, 32 * 1024,
+	64 * 1024, 64 * 1024, 64 * 1024, 64 * 1024,
+	128 * 1024, 128 * 1024, 128 * 1024,
+	256 * 1024, 256 * 1024, 256 * 1024, 256 * 1024,
+};
+
+/* Program flash erase must stay inside one physical sector: the hardware
+ * rejects an erase command that crosses a physical sector boundary, with a
+ * command sequence error, and erases nothing at all.
+ *
+ * MEASURED on a KIT_AURIX_LITE_KIT V1.1 (TC275), 2026-10-03, with
+ * multi-sector erase commands issued one per OpenOCD session so no state
+ * carried over between them:
+ *
+ *   - count 2 starting at bank offset 0x140000, i.e. 0x140000..0x1FFFFF,
+ *     which straddles the 0x180000 boundary: REJECTED, "Command sequence
+ *     error", both neighbouring sectors verified still holding their markers.
+ *   - count 2 starting at bank offset 0x100000, i.e. 0x100000..0x17FFFF,
+ *     exactly one 512 KiB block: ACCEPTED, and both the 256 KiB logical
+ *     sectors inside that block were erased.
+ *
+ * The only value consistent with both results is 512 KiB, with blocks
+ * aligned at 0x000000, 0x080000, 0x100000 and 0x180000 in a 2 MiB bank --
+ * four blocks that tile the bank exactly. A 521 KiB physical sector cannot
+ * do this: 3 x 521 KiB leaves 496 KiB of the bank that no erase command can
+ * ever reach, and 4 x 521 KiB overshoots the end by 36 KiB. The reference
+ * driver in tricore-oss-openocd declares 521 KiB in its bank table while its
+ * own tc2x_eflash_get_pflash_sector_count() helper hardcodes 512 KiB; the
+ * measurement above says the helper is the correct one.
+ *
+ * Erase checks are limited the same way, because the erase-verify command
+ * carries the same "must not cross a physical sector" constraint.
+ */
+#define TC2X_PHYS_SECTOR_SIZE (512 * 1024)
+
+/* Longest run of logical sectors starting at `first` that still fits inside
+ * one physical sector, and never more than up to `last`. Returns a count of
+ * at least 1, because the smallest logical sector (16 KiB) is well inside the
+ * 512 KiB physical sector. */
+static uint32_t tc2x_pflash_erase_sector_count(struct flash_bank *bank, unsigned int first,
+												unsigned int last)
+{
+	for (unsigned int i = first; i <= last; i++) {
+		/* The last sector of the bank, or the next one starting a new
+		 * physical sector, ends the run. */
+		if (i + 1 == bank->num_sectors || i == last)
+			return i - first + 1;
+		if (bank->sectors[i + 1].offset % TC2X_PHYS_SECTOR_SIZE == 0)
+			return i - first + 1;
+	}
+
+	return last - first + 1;
+}
+
+static int tc2x_eflash_probe(struct flash_bank *bank)
+{
+	struct aurix_eflash_bank *tc2x_bank = bank->driver_priv;
+	uint32_t flash_addr = bank->base;
+	uint32_t chipid;
+	int retval;
+
+	if (tc2x_bank->probed)
+		return ERROR_OK;
+
+	retval = target_read_u32(bank->target, SCU_CHIPID, &chipid);
+	if (retval != ERROR_OK) {
+		LOG_ERROR("Cannot read tc2x CHIPID register.");
+		return retval;
+	}
+
+	if ((chipid & SCU_CHIPID_CHTEC) != SCU_CHIPID_CHTEC_TC2X) {
+		LOG_ERROR("CHIPID register does not match tc2x (read 0x%08" PRIx32 ").", chipid);
+		return ERROR_FAIL;
+	}
+
+	/* CHID selects the exact part, which decides how much program flash it
+	 * has. The bank size declared in the configuration is checked against
+	 * the sector table below either way, so an unknown CHID only means the
+	 * bank layout cannot be pre-checked. */
+	uint32_t chipid_variant = chipid & SCU_CHIPID_CHID;
+	if (chipid_variant != SCU_CHIPID_CHID_TC27X && chipid_variant != SCU_CHIPID_CHID_TC29X) {
+		LOG_WARNING("Unknown TC2x CHIPID variant 0x%08" PRIx32
+					", treating it like a TC27x for bank layout.",
+					chipid_variant);
+	}
+
+	bank->minimal_write_gap = FLASH_WRITE_GAP_SECTOR;
+	bank->write_start_alignment = tc2x_bank->burst_size;
+	bank->write_end_alignment = tc2x_bank->burst_size;
+
+	/* Data flash banks are a uniform array of fixed size logical sectors,
+	 * so their sector count is the declared bank size over the sector size.
+	 * Program flash banks are the variable-size sequence above, truncated at
+	 * whatever fits in the declared bank size. */
+	if (tc2x_bank->dflash || tc2x_bank->ucb) {
+		bank->num_sectors = bank->size / tc2x_bank->sector_size;
+
+		if (!bank->num_sectors) {
+			LOG_ERROR("Bank %s is smaller (%" PRIu32 " bytes) than one %u byte sector.",
+					  bank->name, bank->size, tc2x_bank->sector_size);
+			return ERROR_FLASH_BANK_INVALID;
+		}
+	} else {
+		unsigned int count = 0;
+		uint32_t offset = 0;
+
+		for (count = 0; count < ARRAY_SIZE(tc2x_pflash_sector_sizes); count++) {
+			offset += tc2x_pflash_sector_sizes[count];
+			if (offset > bank->size)
+				break;
+		}
+		bank->num_sectors = count;
+
+		if (!bank->num_sectors) {
+			LOG_ERROR("Bank %s is smaller (%" PRIu32 " bytes) than one program flash sector.",
+					  bank->name, bank->size);
+			return ERROR_FLASH_BANK_INVALID;
+		}
+	}
+
+	bank->sectors = calloc(bank->num_sectors, sizeof(struct flash_sector));
+	if (!bank->sectors) {
+		LOG_ERROR("Out of memory while allocating flash sectors.");
+		return ERROR_FAIL;
+	}
+
+	/* See tc3x_eflash_probe() for why the erase and protection state are
+	 * left unknown here. */
+	for (unsigned int i = 0; i < bank->num_sectors; i++) {
+		bank->sectors[i].size = tc2x_bank->dflash || tc2x_bank->ucb ?
+									 tc2x_bank->sector_size :
+									 tc2x_pflash_sector_sizes[i];
+		bank->sectors[i].offset = flash_addr - bank->base;
+		flash_addr += bank->sectors[i].size;
+		bank->sectors[i].is_erased = -1;
+		bank->sectors[i].is_protected = -1;
+	}
+
+	tc2x_bank->probed = true;
+
+	return ERROR_OK;
+}
+
+static int tc2x_eflash_auto_probe(struct flash_bank *bank)
+{
+	struct aurix_eflash_bank *tc2x_bank = bank->driver_priv;
+
+	if (tc2x_bank->probed)
+		return ERROR_OK;
+
+	return tc2x_eflash_probe(bank);
+}
+
 static int tc4x_eflash_probe(struct flash_bank *bank)
 {
 	struct aurix_eflash_bank *tc4x_bank = bank->driver_priv;
@@ -731,6 +962,21 @@ static const struct aurix_eflash_error_desc tc3x_eflash_errors[] = {
 	{ BIT(31), " Flash busy" },
 };
 
+/* TC2x puts its errors at entirely different bit positions from TC3x/TC4x:
+ * 11 flash operation, 12 command sequence, 13 protection, 25 program verify,
+ * 26 erase verify. Bits 30 and 31 are synthesised by the driver (timeout and
+ * busy) rather than read from the register. */
+static const struct aurix_eflash_error_desc tc2x_eflash_errors[] = {
+	{ BIT(11), " Flash operation error" },
+	{ BIT(12), " Command sequence error" },
+	{ BIT(13), " Protection error" },
+	{ BIT(25), " Program Verify Error" },
+	{ BIT(26), " Erase Verify Error" },
+	{ BIT(29), " No page mode entry" },
+	{ BIT(30), " Flash operation timeout" },
+	{ BIT(31), " Flash busy" },
+};
+
 /* Decodes the flash error bits into err_str, truncating instead of overflowing. */
 static void aurix_eflash_get_error_string(struct aurix_eflash_bank *aurix_bank, uint32_t flash_err,
 										  char *err_str, size_t size)
@@ -741,7 +987,10 @@ static void aurix_eflash_get_error_string(struct aurix_eflash_bank *aurix_bank, 
 	if (!size)
 		return;
 
-	if (aurix_bank->tc4x) {
+	if (aurix_bank->tc2x) {
+		desc = tc2x_eflash_errors;
+		count = ARRAY_SIZE(tc2x_eflash_errors);
+	} else if (aurix_bank->tc4x) {
 		desc = tc4x_eflash_errors;
 		count = ARRAY_SIZE(tc4x_eflash_errors);
 	} else {
@@ -787,6 +1036,12 @@ status_err:
 			LOG_ERROR("Failed to read flash operation status");
 			return ERROR_FLASH_OPERATION_FAILED;
 		}
+		/* On TC2x the status and the error bits live in the same word, so
+		 * only the error bits are meaningful as an error. Masking here is
+		 * mandatory: the busy bits occupy 1..6 and the state bits 7,8 and
+		 * 9/10, and every one of them is set during a normal operation. */
+		if (aurix_bank->tc2x)
+			flash_err &= TC2X_FSR_ERRORS;
 		if (aurix_bank->tc4x) {
 			if (flash_busy & (1 << 31)) {
 				timeout_occurred = false;
@@ -806,11 +1061,13 @@ status_err:
 
 	if (flash_err) {
 		/* Verify and fatal bits are at different positions per family:
-		 * erase-verify is 7 on TC4x and 4 on TC3x; the fatal "cannot
-		 * recover" bits are 8|5 on TC4x and 0 on TC3x (a flash operation
-		 * error leaves the controller in an indeterminate state). */
-		uint32_t verify_bit = aurix_bank->tc4x ? 7 : 4;
-		uint32_t fatal_mask = aurix_bank->tc4x ? ((1 << 8) | (1 << 5)) : (1 << 0);
+		 * erase-verify is 7 on TC4x, 4 on TC3x and 26 on TC2x; the fatal
+		 * "cannot recover" bits are 8|5 on TC4x, 0 on TC3x and 11 on TC2x
+		 * (a flash operation error leaves the controller in an
+		 * indeterminate state). */
+		uint32_t verify_bit = aurix_bank->tc2x ? 26 : aurix_bank->tc4x ? 7 : 4;
+		uint32_t fatal_mask = aurix_bank->tc2x ? BIT(11) :
+							   aurix_bank->tc4x ? ((1 << 8) | (1 << 5)) : (1 << 0);
 		if (verify_error) {
 			if (flash_err & (1 << verify_bit)) {
 				*verify_error = true;
@@ -825,7 +1082,7 @@ status_err:
 		LOG_ERROR("Flash operation failed with error:%s", err_str);
 		if (flash_err & fatal_mask)
 			LOG_ERROR("Critical flash error. Please reset device to continue");
-		else if (flash_err & ((1 << 1) | (1 << 2)))
+		else if (flash_err & (aurix_bank->tc2x ? (BIT(12) | BIT(13)) : ((1 << 1) | (1 << 2))))
 			ret = aurix_eflash_reset_to_read(bank);
 		else
 			ret = aurix_eflash_clear_status(bank);
@@ -882,6 +1139,10 @@ static inline int aurix_eflash_enter_page_mode(struct flash_bank *bank, bool dfl
 	ret = ocmts_run(ocmts);
 	if (ret)
 		goto err;
+	/* TC2x: status and errors share one word, so drop the state bits before
+	 * deciding whether the command failed. */
+	if (aurix_bank->tc2x)
+		flash_err &= TC2X_FSR_ERRORS;
 	if (!(flash_sts & (1 << aurix_bank->page_bit)))
 		flash_err |= (1 << 29);
 	if (flash_err) {
@@ -903,6 +1164,109 @@ err:
 	return ret;
 }
 
+/* --- TC2x ENDINIT handling ---------------------------------------------
+ *
+ * TC2x program flash erase and program commands are protected by ENDINIT.
+ * While ENDINIT is set the flash sequencer ignores them and raises a
+ * protection error (FSR bit 13) instead.
+ *
+ * Lifting it is the documented two-step password write to WDTS_CON0: write
+ * the password with bit 0 clear, then write it again with bit 1 set and
+ * bit 0 carrying the wanted ENDINIT value. Both writes of a pair must be
+ * derived from the register value read BEFORE the pair, which is why
+ * aurix_eflash_tc2x_endinit_values() reads it once and returns all three
+ * values together. A pair must also be re-derived for every operation: the
+ * register changes after each toggle, so reusing the values across a
+ * multi-sector erase would write a stale password on the second sector.
+ *
+ * Verified on silicon (KIT_AURIX_LITE_KIT V1.1, TC275, 2026-10-03): the
+ * first erase after power-up succeeds while ENDINIT reads 0, the on-target
+ * loader in contrib/loaders/flash/aurix/aurix-flash-program.c then restores
+ * ENDINIT to 1 when it finishes a page program, and every later erase then
+ * fails with "Protection error" until ENDINIT is lifted here. DFLASH and the
+ * UCBs are not protected this way, which matches aurix-flash-program.c.
+ *
+ * These helpers only QUEUE their writes. They must not call ocmts_run():
+ * they are used in the middle of a flash command sequence, and flushing
+ * there would split the sequence and leave the sequencer in the wrong state.
+ */
+static int aurix_eflash_tc2x_endinit_values(struct ocmts *ocmts, uint32_t *unlock, uint32_t *clear,
+											uint32_t *set)
+{
+	uint32_t value = 0;
+
+	if (ocmts_io_read_u32(ocmts, TC2X_WDTS_CON0, &value) != ERROR_OK) {
+		LOG_ERROR("Failed to read TC2X WDTS_CON0 before toggling ENDINIT.");
+		return ERROR_FLASH_OPERATION_FAILED;
+	}
+
+	/* Bits 7:2 of the low byte carry the password; bit 0 is ENDINIT and
+	 * bit 1 selects that the write is a state change. */
+	const uint32_t password = (value & 0xFFFFFF00u) | (~value & 0xFCu);
+
+	*unlock = password | 0x01u;
+	*clear = password | 0x02u; /* endinit = 0 */
+	*set = password | 0x03u;	 /* endinit = 1 */
+
+	return ERROR_OK;
+}
+
+/* Queues one complete two-step toggle. Must be called with no other flash
+ * command sequence open. */
+static int aurix_eflash_tc2x_queue_endinit(struct ocmts *ocmts, uint32_t unlock, uint32_t state)
+{
+	int ret = ocmts_queue_write_u32(ocmts, TC2X_WDTS_CON0, &unlock);
+
+	if (ret)
+		return ret;
+
+	return ocmts_queue_write_u32(ocmts, TC2X_WDTS_CON0, &state);
+}
+
+/* Reads WDTS_CON0 back until ENDINIT actually reads `want`, or gives up.
+ *
+ * The AURIX user manuals state that clearing an ENDINIT bit takes some time
+ * and that Endinit-protected registers must only be accessed once the bit is
+ * really cleared, recommending a read-back. That guidance is written for the
+ * TC3xx part manual (Section 9.4.4, WDTSCON0 at SRU offset 0x02A8 = 0xF00362A8
+ * on TC3xx). THE TC3xx MANUAL DOES NOT DOCUMENT THE TC2x WDTS_CON0 AT 0x0F0
+ * (0xF00360F0), so it cannot be used to confirm the TC2x register layout; the
+ * layout here comes from contrib/loaders/flash/aurix/tc2x-flash.h instead.
+ *
+ * The read-back is applied anyway, because it is free, because it is what the
+ * independent on-target loader already does for the same register
+ * (tc2x_safety_endinit() polls WDTS_CON0 in a loop,
+ * contrib/loaders/flash/aurix/aurix-flash-program.c), and because touching an
+ * Endinit-protected register before the bit has settled is exactly the kind
+ * of race that fails intermittently rather than reproducibly.
+ *
+ * A timeout here is reported, not ignored: it means the toggle did not take
+ * effect, and every following erase would silently fail with a protection
+ * error.
+ */
+static int aurix_eflash_tc2x_wait_endinit(struct ocmts *ocmts, uint32_t want)
+{
+	const int64_t deadline = timeval_ms() + 100;
+
+	while (timeval_ms() < deadline) {
+		uint32_t value = 0;
+
+		if (ocmts_io_read_u32(ocmts, TC2X_WDTS_CON0, &value) != ERROR_OK) {
+			LOG_ERROR("Failed to read back TC2X WDTS_CON0 while toggling ENDINIT.");
+			return ERROR_FLASH_OPERATION_FAILED;
+		}
+
+		if ((value & 1u) == want)
+			return ERROR_OK;
+
+		jtag_sleep(10);
+	}
+
+	LOG_ERROR("TC2X ENDINIT did not settle to %u within the timeout.", want);
+
+	return ERROR_FLASH_OPERATION_FAILED;
+}
+
 int aurix_eflash_erase(struct flash_bank *bank, unsigned int first, unsigned int last)
 {
 	struct aurix_eflash_bank *aurix_bank = bank->driver_priv;
@@ -917,8 +1281,14 @@ int aurix_eflash_erase(struct flash_bank *bank, unsigned int first, unsigned int
 	/* A reset re-arms the safety watchdog, and while it is armed the flash
 	 * controller answers every erase with "Protection error". The probe at
 	 * flash init disables it, but "reset halt" between init and the erase puts
-	 * it back, so re-apply it here. See tc3x_eflash_disable_safety_wdt(). */
-	if (!aurix_bank->tc4x && !aurix_bank->dflash) {
+	 * it back, so re-apply it here. See tc3x_eflash_disable_safety_wdt().
+	 * TC2x is excluded: every register that function touches (WDTSCON0,
+	 * WDTCON0/1, WDTCPU0SR, SMU_CMD/SMU_DBG) is a TC3x-specific address, and
+	 * TC2x's own tc2x_eflash_probe() does not call it either. Hardware
+	 * testing (see aurix_eflash_tc2x_endinit_values()'s comment) found
+	 * lifting ENDINIT alone sufficient to erase/program a TC275 Lite Kit, so
+	 * TC2x apparently does not need an equivalent step here. */
+	if (!aurix_bank->tc4x && !aurix_bank->dflash && !aurix_bank->tc2x) {
 		ret = tc3x_eflash_disable_safety_wdt(bank);
 		if (ret != ERROR_OK)
 			return ret;
@@ -939,8 +1309,25 @@ int aurix_eflash_erase(struct flash_bank *bank, unsigned int first, unsigned int
 	while (first <= last) {
 		uint32_t sector_count;
 		unsigned int failed_first = first;
+		/* Program flash erase is ENDINIT protected on TC2x. Re-derived for
+		 * every sector because the password depends on the current register
+		 * value, which the previous iteration changed. DFLASH and the UCBs
+		 * are not protected, so they skip this entirely. */
+		bool lift_endinit = aurix_bank->tc2x && !aurix_bank->dflash && !aurix_bank->ucb;
+		uint32_t endinit_unlock = 0, endinit_clear = 0, endinit_set = 0;
+		if (lift_endinit) {
+			ret = aurix_eflash_tc2x_endinit_values(ocmts, &endinit_unlock, &endinit_clear, &endinit_set);
+			if (ret)
+				return ret;
+		}
 
-		if (aurix_bank->tc4x) {
+		if (aurix_bank->tc2x) {
+			/* Erase as many logical sectors as fit inside one physical
+			 * sector. A multi-sector erase must not cross a physical sector
+			 * boundary; the hardware rejects one that does, with a command
+			 * sequence error, and erases nothing. */
+			sector_count = tc2x_pflash_erase_sector_count(bank, first, last);
+		} else if (aurix_bank->tc4x) {
 			/* Limit to logical sector erase count. */
 			sector_count = MIN(aurix_bank->num_erase_sectors, last - first + 1);
 		} else {
@@ -958,9 +1345,29 @@ int aurix_eflash_erase(struct flash_bank *bank, unsigned int first, unsigned int
 		/* See tc3x_eflash_endinit_toggle()'s comment: PFLASH command
 		 * sequences need Safety ENDINIT actively removed, on top of (and
 		 * separate from) both watchdogs being in Disabled Mode. DFLASH and
-		 * TC4x are not affected. */
-		if (!aurix_bank->tc4x && !aurix_bank->dflash) {
+		 * TC4x are not affected. TC2x is excluded here too and handled by
+		 * the lift_endinit block below instead: its Safety WDT CON0 lives
+		 * at a different address (TC2X_WDTS_CON0, not TC3X_WDTSCON0), and
+		 * the clear/set pair must be queued inside this same OCMTS sequence
+		 * rather than issued as separate immediate writes. */
+		if (!aurix_bank->tc4x && !aurix_bank->dflash && !aurix_bank->tc2x) {
 			ret = tc3x_eflash_endinit_toggle(bank, 0);
+			if (ret)
+				goto sequence_err;
+		}
+
+		if (lift_endinit) {
+			/* The clear has to complete before the erase command, which
+			 * touches an Endinit-protected register, so this pair is run on
+			 * its own and then read back before anything else is queued.
+			 * See aurix_eflash_tc2x_wait_endinit(). */
+			ret = aurix_eflash_tc2x_queue_endinit(ocmts, endinit_unlock, endinit_clear);
+			if (ret)
+				goto sequence_err;
+			ret = ocmts_run(ocmts);
+			if (ret)
+				goto sequence_err;
+			ret = aurix_eflash_tc2x_wait_endinit(ocmts, 0);
 			if (ret)
 				goto sequence_err;
 		}
@@ -978,6 +1385,12 @@ int aurix_eflash_erase(struct flash_bank *bank, unsigned int first, unsigned int
 		if (ret)
 			goto sequence_err;
 
+		if (lift_endinit) {
+			ret = aurix_eflash_tc2x_queue_endinit(ocmts, endinit_unlock, endinit_set);
+			if (ret)
+				goto sequence_err;
+		}
+
 		ret = ocmts_run(ocmts);
 		/* Hint: User manual requires Wait for 2*1/fFSI ns (DFlash) or 3*1/fFSI + 8*1/fSRI ns (PFlash)
 		 * The OCMTS delay for the next instruction is sufficient. */
@@ -985,8 +1398,12 @@ sequence_err:
 		/* Always try to restore ENDINIT, even if something above failed,
 		 * so a failed erase never leaves Safety ENDINIT removed. Only
 		 * report the restore step's own failure if nothing earlier already
-		 * failed, so a real erase-sequence error is never masked. */
-		if (!aurix_bank->tc4x && !aurix_bank->dflash) {
+		 * failed, so a real erase-sequence error is never masked. TC2x is
+		 * excluded: its restore is already queued inside the lift_endinit
+		 * block above, in the same OCMTS sequence, and calling
+		 * tc3x_eflash_endinit_toggle() here too would write TC3X_WDTSCON0,
+		 * the wrong register for this family. */
+		if (!aurix_bank->tc4x && !aurix_bank->dflash && !aurix_bank->tc2x) {
 			int endinit_ret = tc3x_eflash_endinit_toggle(bank, 1);
 			if (ret == ERROR_OK)
 				ret = endinit_ret;
@@ -1009,9 +1426,28 @@ sequence_err:
 			goto restore_endinit;
 		}
 
+		if (lift_endinit) {
+			ret = aurix_eflash_tc2x_wait_endinit(ocmts, 1);
+			if (ret)
+				goto restore_endinit;
+		}
 		continue;
 
 restore_endinit:
+		/* Never leave ENDINIT cleared on a safety-critical register, even on
+		 * the failure path. */
+		if (lift_endinit) {
+			uint32_t u = 0, c = 0, s = 0;
+			int restore_ret = ERROR_FAIL;
+
+			if (aurix_eflash_tc2x_endinit_values(ocmts, &u, &c, &s) == ERROR_OK &&
+				aurix_eflash_tc2x_queue_endinit(ocmts, u, s) == ERROR_OK)
+				restore_ret = ocmts_run(ocmts);
+			if (restore_ret == ERROR_OK)
+				LOG_WARNING("Restored ENDINIT to 1 after a failed erase.");
+			else
+				LOG_ERROR("Failed to restore ENDINIT after the erase failed.");
+		}
 		return ERROR_FLASH_OPERATION_FAILED;
 	}
 
@@ -1042,10 +1478,19 @@ int aurix_eflash_erase_check(struct flash_bank *bank)
 		return ret;
 	}
 
+	/* The erase-verify command carries the same "must not cross a physical
+	 * sector" constraint as the erase command, so TC2x walks the same
+	 * physical-sector-aligned runs that aurix_eflash_erase() does. The run
+	 * lengths are NOT uniform (16, 4, 3 and 4 logical sectors for a 2 MiB
+	 * TC2x program flash bank), so the count is recomputed per iteration
+	 * rather than used as a fixed stride. */
 	for (sector = 0; sector < bank->num_sectors; sector++) {
 		/* Put address always in segment 0xA */
 		uint32_t addr = (~0xF0000000 & (bank->base + bank->sectors[sector].offset)) + 0xA0000000;
-		uint32_t verify_sectors = aurix_bank->num_erase_sectors;
+		uint32_t verify_sectors =
+			aurix_bank->tc2x ?
+				tc2x_pflash_erase_sector_count(bank, sector, bank->num_sectors - 1) :
+				aurix_bank->num_erase_sectors;
 
 		ret = ocmts_queue_write_u32(ocmts, aurix_bank->cmd_addr + 0xAA50, &addr);
 		if (ret)
@@ -1163,8 +1608,14 @@ int aurix_eflash_protect_check(struct flash_bank *bank)
 
 	/* The UCBs hold the protection configuration rather than being described
 	 * by it, and the TC4x DMU lays its configuration out differently. Report
-	 * those as unknown instead of reporting a wrong state. */
-	if (aurix_bank->ucb || aurix_bank->tc4x) {
+	 * those as unknown instead of reporting a wrong state.
+	 *
+	 * TC2x is in the same position for a different reason: its protection
+	 * state is a single register with no per-sector and no per-bank
+	 * breakdown, so it cannot be mapped onto the per sector flags this
+	 * interface is asked for. Reading the TC3x/TC4x DMU layout here would
+	 * return unrelated registers. */
+	if (aurix_bank->ucb || aurix_bank->tc4x || aurix_bank->tc2x) {
 		aurix_eflash_protection_unknown(bank);
 		return ERROR_OK;
 	}
@@ -1225,6 +1676,14 @@ int aurix_eflash_protect_check(struct flash_bank *bank)
 	return ERROR_OK;
 }
 
+static const uint8_t tc2x_pflash_write_code[] = {
+#include "../../../contrib/loaders/flash/aurix/tc2x-pflash-program.inc"
+};
+
+static const uint8_t tc2x_dflash_write_code[] = {
+#include "../../../contrib/loaders/flash/aurix/tc2x-dflash-program.inc"
+};
+
 static const uint8_t tc3x_pflash_write_code[] = {
 #include "../../../contrib/loaders/flash/aurix/tc3x-pflash-program.inc"
 };
@@ -1262,12 +1721,15 @@ static int aurix_eflash_write_algo(struct flash_bank *bank, uint32_t address, co
 	size_t code_size;
 
 	/*
-	 * Select the loader variant matching this bank's family (TC3x has a
-	 * single command interface; TC4x has one per module, "cs" being the
-	 * second/CSRM one), and bank kind (dflash is also true for UCB banks,
+	 * Select the loader variant matching this bank's family (TC2x and TC3x
+	 * have a single command interface; TC4x has one per module, "cs" being
+	 * the second/CSRM one), and bank kind (dflash is also true for UCB banks,
 	 * which use the DFLASH command sequence).
 	 */
-	if (!aurix_bank->tc4x) {
+	if (aurix_bank->tc2x) {
+		code = aurix_bank->dflash ? tc2x_dflash_write_code : tc2x_pflash_write_code;
+		code_size = aurix_bank->dflash ? sizeof(tc2x_dflash_write_code) : sizeof(tc2x_pflash_write_code);
+	} else if (!aurix_bank->tc4x) {
 		code = aurix_bank->dflash ? tc3x_dflash_write_code : tc3x_pflash_write_code;
 		code_size = aurix_bank->dflash ? sizeof(tc3x_dflash_write_code) : sizeof(tc3x_pflash_write_code);
 	} else if (aurix_bank->cmd_addr == 0xF80C0000) {
@@ -1334,8 +1796,9 @@ static int aurix_eflash_write(struct flash_bank *bank, const uint8_t *buffer, ui
 	/* Same reason as in aurix_eflash_erase(): "program" resets the target
 	 * between the erase and the write, which re-arms the safety watchdog, and
 	 * the on-target loader is then reset out from under itself part way
-	 * through programming. */
-	if (!aurix_bank->tc4x && !aurix_bank->dflash) {
+	 * through programming. TC2x is excluded; see aurix_eflash_erase()'s
+	 * identical guard for why. */
+	if (!aurix_bank->tc4x && !aurix_bank->dflash && !aurix_bank->tc2x) {
 		ret = tc3x_eflash_disable_safety_wdt(bank);
 		if (ret != ERROR_OK)
 			return ret;
@@ -1422,8 +1885,19 @@ fallback:
 		/* See tc3x_eflash_endinit_toggle()'s comment: the write command
 		 * sequence below needs Safety ENDINIT actively removed, same as
 		 * aurix_eflash_erase(). The page load writes above are not gated by
-		 * it. */
-		if (!aurix_bank->tc4x && !aurix_bank->dflash) {
+		 * it. TC2x is excluded here: its PFLASH program flash is also
+		 * ENDINIT protected, but the toggle is deliberately NOT done here
+		 * for it. In the algo path the on-target loader lifts and restores
+		 * ENDINIT itself around the write command (tc2x_safety_endinit(),
+		 * contrib/loaders/flash/aurix/aurix-flash-program.c), and in this
+		 * fallback path a host-side toggle cannot be placed correctly: it
+		 * would have to sit between the 0xA0 and the 0xAA/0x7A write
+		 * commands, and the ocmts transaction cannot be flushed there
+		 * without splitting the sequence. If ENDINIT really is set, the
+		 * sequencer raises a protection error (FSR bit 13) which
+		 * aurix_eflash_handle_error() below reports, so the failure is
+		 * visible rather than silent. */
+		if (!aurix_bank->tc4x && !aurix_bank->dflash && !aurix_bank->tc2x) {
 			ret = tc3x_eflash_endinit_toggle(bank, 0);
 			if (ret)
 				goto err;
@@ -1440,9 +1914,12 @@ fallback:
 		if (ret)
 			goto err;
 
-		/* Check for burst sequence. The single-page command is 0xAA. */
+		/* Check for burst sequence. The burst command differs per family:
+		 * TC2x uses 0x7A, TC3x and TC4x use 0xA6. The single-page command
+		 * is 0xAA everywhere. */
 		if (burst_mode) {
-			uint32_t burst_cmd = TC3X_FLASH_WRITE_BURST_CMD;
+			uint32_t burst_cmd = aurix_bank->tc2x ? TC2X_FLASH_WRITE_BURST_CMD :
+														TC3X_FLASH_WRITE_BURST_CMD;
 			ret = ocmts_queue_write_u32(ocmts, aurix_bank->cmd_addr + 0xAAA8, &burst_cmd);
 			if (ret)
 				goto err;
@@ -1454,8 +1931,11 @@ fallback:
 		ret = ocmts_run(ocmts);
 err:
 		/* Always try to restore ENDINIT, even if something above failed. See
-		 * aurix_eflash_erase()'s identical handling. */
-		if (!aurix_bank->tc4x && !aurix_bank->dflash) {
+		 * aurix_eflash_erase()'s identical handling. TC2x is excluded: it
+		 * was never lifted above (see the comment there), so there is
+		 * nothing host-side to restore, and tc3x_eflash_endinit_toggle()
+		 * would write the wrong register (TC3X_WDTSCON0) for this family. */
+		if (!aurix_bank->tc4x && !aurix_bank->dflash && !aurix_bank->tc2x) {
 			int endinit_ret = tc3x_eflash_endinit_toggle(bank, 1);
 			if (ret == ERROR_OK)
 				ret = endinit_ret;
@@ -1488,6 +1968,153 @@ static int aurix_eflash_read(struct flash_bank *bank, uint8_t *buffer, uint32_t 
 static void aurix_free_driver_priv(struct flash_bank *bank)
 {
 	free(bank->driver_priv);
+}
+
+/* Maps a TC2x bank onto its FSR busy bit.
+ *
+ * The upstream reference implementation returns 0 for DFLASH0 and 1 for
+ * DFLASH1. That is an off-by-one against the register: tc2x-flash.h, written
+ * independently of any driver, puts DFLASH0 busy at bit 1 and DFLASH1 busy at
+ * bit 2, with bit 0 unused. Reading bit 0 means the DFLASH0 busy poll always
+ * sees "not busy" and returns before the operation has finished, and reading
+ * bit 1 for DFLASH1 actually watches DFLASH0's busy bit. Both are latent and
+ * neither shows up on a part that is never busy, which is why it survived.
+ *
+ * tc2x-flash.h is trusted here because it is the same source the on-target
+ * loader is built from and it was not derived from the driver, so the two
+ * agreeing is a real cross-check rather than a copy. */
+static uint8_t tc2x_busy_bit_for(bool is_dflash, bool is_dflash1, bool is_ucb, unsigned int pflash_index)
+{
+	if (is_ucb) {
+		/* The UCB sits inside the DFLASH0 array, so DFLASH0's busy bit
+		 * covers it. */
+		return 1;
+	}
+
+	if (is_dflash)
+		return is_dflash1 ? 2 : 1;
+
+	/* Program flash banks are numbered from 0, busy at bits 3..6. */
+	return 3 + pflash_index;
+}
+
+FLASH_BANK_COMMAND_HANDLER(tc2x_flash_bank_command)
+{
+	struct aurix_eflash_bank *tc2x_bank;
+	uint32_t bank_base = bank->base & 0x0FFFFFFF;
+	bool is_flash_segment = (bank->base & 0xF0000000) == 0x80000000 ||
+							(bank->base & 0xF0000000) == 0xA0000000;
+	bool is_pflash = is_flash_segment && bank_base < 0x01000000;
+	bool is_ucb = bank->base == 0xAF100000;
+	bool is_dflash0 = bank->base == 0xAF000000;
+	bool is_dflash1 = bank->base == 0xAF110000;
+	bool is_dflash = is_dflash0 || is_dflash1;
+
+	if (is_pflash) {
+		/* Program flash banks are 2 MiB on both TC27x and TC29x, and a bank
+		 * must start on a 2 MiB boundary so the variable sector table can
+		 * start at sector 0 of the table. */
+		if (bank->size != 2 * 1024 * 1024) {
+			LOG_ERROR("Invalid pflash bank size. TC2x program flash banks are 2MB.");
+			return ERROR_FLASH_BANK_INVALID;
+		}
+		if (bank->base % (2 * 1024 * 1024) != 0) {
+			LOG_ERROR("Invalid pflash bank base address. Base should be aligned to 2MB.");
+			return ERROR_FLASH_BANK_INVALID;
+		}
+	} else if (is_ucb) {
+		/* 16 KiB. Corroborated by the reference driver and by the board
+		 * configuration, which agree; not independently confirmed on
+		 * silicon, and programming the UCB is not supported anyway (see the
+		 * probe: UCB protection state is reported as unknown). */
+		if (bank->size != 16 * 1024) {
+			LOG_ERROR("Invalid UCB bank size. Size should be 16KB.");
+			return ERROR_FLASH_BANK_INVALID;
+		}
+	} else if (is_dflash0) {
+		/* DFLASH0 EEPROM. 384 KiB is what this TC275 reports: a
+		 * single-sector erase succeeds up to 0xAF05EFFF and raises a command
+		 * sequence error at 0xAF060000, on a board whose CHIPID reads
+		 * 0x47467072 (CHID 0x7 = TC27x). The reference driver says 348 KiB
+		 * for this part and 768 KiB in its TC29x table; 348 KiB is not even
+		 * a multiple of the 8 KiB logical sector size, so it cannot be
+		 * right. See CONSTANTS.md. */
+		if (bank->size != 384 * 1024) {
+			LOG_ERROR("Invalid dflash0 bank size. This device's DFLASH0 is 384KB.");
+			return ERROR_FLASH_BANK_INVALID;
+		}
+	} else if (is_dflash1) {
+		/* DFLASH1 standby RAM. 64 KiB from the reference driver only; this
+		 * driver cannot confirm it and this bank is owned by the HSM, so
+		 * nothing here has been exercised against hardware. */
+		if (bank->size != 64 * 1024) {
+			LOG_ERROR("Invalid dflash1 bank size. Size should be 64KB.");
+			return ERROR_FLASH_BANK_INVALID;
+		}
+	} else {
+		LOG_ERROR("Invalid flash bank base address: 0x%08" PRIx64, bank->base);
+		return ERROR_FLASH_BANK_INVALID;
+	}
+
+	tc2x_bank = malloc(sizeof(struct aurix_eflash_bank));
+	if (!tc2x_bank)
+		return ERROR_FLASH_OPERATION_FAILED;
+
+	/* TC2x has one command sequencer for every bank and one status/error
+	 * word. There is no second module and no FSI. */
+	tc2x_bank->cmd_addr = 0xAF000000;
+	tc2x_bank->reg_addr = TC2X_REG_BASE;
+	tc2x_bank->fsi_addr = 0;
+	tc2x_bank->sts_offset = TC2X_FSR_OFFSET;
+	tc2x_bank->err_offset = TC2X_FSR_OFFSET;
+
+	/* Logical sector size. Program flash uses the variable table in
+	 * tc2x_eflash_probe(), so sector_size only drives the data flash and
+	 * UCB banks. */
+	tc2x_bank->sector_size = is_ucb ? 1024 : 8 * 1024;
+	tc2x_bank->phys_sector_size = TC2X_PHYS_SECTOR_SIZE;
+	/* Never read by the TC2x paths: erase and verify use one sector per
+	 * command, so there is no maximum to enforce. */
+	tc2x_bank->num_erase_sectors = 1;
+
+	/* Smallest programmable unit and the burst length, both from
+	 * tc2x-flash.h (PAGE_SIZE / BURST_SIZE). The 4 KiB figure in the
+	 * reference board configuration is wrong: it is neither the program
+	 * page nor the data flash page, and using it would make
+	 * aurix_eflash_write() reject every 32 byte program. */
+	tc2x_bank->page_size = is_dflash || is_ucb ? 8 : 32;
+	tc2x_bank->burst_size = is_dflash || is_ucb ? 32 : 256;
+	/* Page-mode-ready bit in the FSR, per flash type. */
+	tc2x_bank->page_bit = is_dflash || is_ucb ? 10 : 9;
+
+	/* Program flash bank index, used to pick the FSR busy bit. Derived from
+	 * the bank BASE ADDRESS, not from bank->bank_number: bank_number counts
+	 * every flash bank in the session including the data flash, the UCBs and
+	 * the "virtual" aliases, so it only happens to agree with the program
+	 * flash index in one particular declaration order. The base address is
+	 * fixed by the part, so it cannot drift. */
+	uint8_t pflash_index = is_pflash ? (bank->base - TC2X_PFLASH_BASE) / (2 * 1024 * 1024) : 0;
+	if (pflash_index > 3) {
+		LOG_ERROR("Invalid TC2x program flash bank base 0x%08" PRIx64, bank->base);
+		free(tc2x_bank);
+		return ERROR_FLASH_BANK_INVALID;
+	}
+	tc2x_bank->busy_bit = tc2x_busy_bit_for(is_dflash, is_dflash1, is_ucb, pflash_index);
+
+	tc2x_bank->write_timeout_ms = 10;
+	tc2x_bank->erase_timeout_ms = is_ucb ? 200 : is_dflash ? 500 : 400;
+
+	tc2x_bank->dflash = is_dflash || is_ucb;
+	tc2x_bank->dflash1 = is_dflash1;
+	tc2x_bank->ucb = is_ucb;
+	tc2x_bank->pflash_index = pflash_index;
+	tc2x_bank->fallback_mode = false;
+	tc2x_bank->tc2x = true;
+	tc2x_bank->tc4x = false;
+	tc2x_bank->probed = false;
+	bank->driver_priv = tc2x_bank;
+
+	return ERROR_OK;
 }
 
 FLASH_BANK_COMMAND_HANDLER(tc3x_flash_bank_command)
@@ -1570,6 +2197,7 @@ FLASH_BANK_COMMAND_HANDLER(tc3x_flash_bank_command)
 	 * index order, so the bank number selects the DMU register set. */
 	tc3x_bank->pflash_index = is_pflash ? bank->bank_number : 0;
 	tc3x_bank->fallback_mode = false;
+	tc3x_bank->tc2x = false;
 	tc3x_bank->tc4x = false;
 	tc3x_bank->probed = false;
 	bank->driver_priv = tc3x_bank;
@@ -1686,6 +2314,7 @@ FLASH_BANK_COMMAND_HANDLER(tc4x_flash_bank_command)
 	 * available and the algorithm path is fixed and validated the same way.
 	 */
 	tc4x_bank->fallback_mode = true;
+	tc4x_bank->tc2x = false;
 	tc4x_bank->tc4x = true;
 	tc4x_bank->probed = false;
 	bank->driver_priv = tc4x_bank;
@@ -1742,6 +2371,20 @@ static const struct command_registration aurix_eflash_command_handlers[] = {
 		.chain = aurix_eflash_subcommand_handlers,
 	},
 	COMMAND_REGISTRATION_DONE};
+
+const struct flash_driver tc2x_eflash = {
+	.name = "tc2x_eflash",
+	.flash_bank_command = tc2x_flash_bank_command,
+	.commands = aurix_eflash_command_handlers,
+	.probe = tc2x_eflash_probe,
+	.auto_probe = tc2x_eflash_auto_probe,
+	.erase = aurix_eflash_erase,
+	.write = aurix_eflash_write,
+	.read = aurix_eflash_read,
+	.erase_check = aurix_eflash_erase_check,
+	.protect_check = aurix_eflash_protect_check,
+	.free_driver_priv = aurix_free_driver_priv,
+};
 
 const struct flash_driver tc3x_eflash = {
 	.name = "tc3x_eflash",
