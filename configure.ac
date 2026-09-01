@@ -146,6 +146,7 @@ m4_define([USB1_ADAPTERS],
 	[[usbprog], [USBProg JTAG Programmer], [USBPROG]],
 	[[esp_usb_jtag], [Espressif JTAG Programmer], [ESP_USB_JTAG]],
 	[[eud], [Qualcomm Embedded USB Debugger], [EUD]],
+	[[miniwiggler], [Infineon miniWiggler V3 Debug Probe], [MINIWIGGLER]],
 	[[cmsis_dap_v2], [CMSIS-DAP v2 compliant dongle (USB bulk)], [CMSIS_DAP_USB]]])
 
 # Please keep cmsis_dap_v2 the last in USB1_ADAPTERS

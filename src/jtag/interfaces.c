@@ -116,6 +116,9 @@ struct adapter_driver *adapter_drivers[] = {
 #if BUILD_LINUXSPIDEV == 1
 		&linuxspidev_adapter_driver,
 #endif
+#if BUILD_MINIWIGGLER == 1
+		&miniwiggler_adapter_driver,
+#endif
 #if BUILD_OPENDOUS == 1
 		&opendous_adapter_driver,
 #endif

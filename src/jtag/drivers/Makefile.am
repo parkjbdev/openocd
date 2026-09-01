@@ -222,6 +222,9 @@ endif
 if XVC
 DRIVERFILES += %D%/xvc.c
 endif
+if MINIWIGGLER
+DRIVERFILES += %D%/miniwiggler.c
+endif
 
 DRIVERHEADERS = \
 	%D%/bitbang.h \

@@ -3443,6 +3443,85 @@ The result can be converted to Volts (ignoring the most significant bytes, alway
 opendous-jtag is a freely programmable USB adapter.
 @end deffn
 
+@deffn {Interface Driver} {miniwiggler}
+This is the Infineon miniWiggler V3, the debug probe built into the AURIX
+Lite Kit evaluation boards and also sold standalone. It is an FT2232H based
+device driven over the MPSSE-based FTDI helpers shared with the @code{ftdi}
+driver, and it speaks the Infineon DAP protocol,
+@pxref{ifxdaptransport,,Infineon DAP}.
+
+The driver talks to the probe directly and does not require Infineon's DAS
+runtime to be installed.
+
+@deffn {Config Command} {miniwiggler vid_pid} vid pid
+Set the USB vendor and product ID of the probe. The default is
+@code{0x058b 0x0043}, which is what the on-board probe of the AURIX Lite Kit
+reports.
+@end deffn
+
+@deffn {Command} {miniwiggler ioinfo}
+Read and display the DAP IOINFO status register. Bit 2 is a sticky error
+latch, set for example when an uncorrectable ECC error is raised by reading
+erased flash. While it is set, all reads return zero.
+@end deffn
+
+@deffn {Command} {miniwiggler clearerr}
+Clear the sticky error latch reported by @command{miniwiggler ioinfo} without
+resetting the device. The driver does this automatically when it detects the
+condition; the command is provided for diagnostics.
+@end deffn
+
+@deffn {Command} {miniwiggler reconnect}
+Redo the full DAP connect handshake. This asserts reset, so the target stops
+running.
+@end deffn
+
+The following commands are diagnostics for board bring-up. They are not
+needed for normal use of the driver, none of them change its default
+behaviour, and they are not a stable interface.
+
+@deffn {Command} {miniwiggler probeocmts} @var{addr} [@var{value}]
+Read or write one 32-bit word through the DAP CBS path, bypassing the
+@code{ocmts init} unlock state machine entirely. This is the only way to tell
+a DAP transport fault apart from a wrong-register or silicon-state one once
+@code{ocmts init} has already failed. Writing a debug register by hand can
+leave the core in an undefined state, so use it with care.
+@end deffn
+
+@deffn {Command} {miniwiggler probeocmtsbatch} @var{oec_addr} @var{ostate_addr} @var{v1} @var{v2} [@var{v3} ...]
+Send the @code{ocmts init} key sequence to @var{oec_addr} in a single DAP
+batch, then read @var{ostate_addr} back. This exercises the batch path, and
+with it the response decoder, which a single-word @command{probeocmts} does
+not.
+@end deffn
+
+@deffn {Command} {miniwiggler dapisc} [@var{key}|sync]
+Run the DAPISC key exchange and print the response that the connect sequence
+normally discards. With @code{sync} the key read back from the device is
+printed; the default key is @code{0x4ABBAF530400}.
+@end deffn
+
+@deffn {Command} {miniwiggler tc4x_keyexchange} [@var{w0} @var{w1} ... @var{w7}]
+Explicitly run the TC4x COMDATA key exchange and report its own pass/fail,
+rather than relying on the connect-time call, which intentionally never fails
+connect on a board whose provisioned key is unknown. With no arguments the
+built-in all-zero key is used.
+@end deffn
+
+@deffn {Command} {miniwiggler wdtprobe} @var{addr} @var{samples} @var{delay_ms} [reset]
+Time-resolved read of @var{addr}, @var{samples} times @var{delay_ms}
+milliseconds apart, optionally after a reset. Looks for the transient window
+that identifies a safety-watchdog reset.
+@end deffn
+
+@deffn {Command} {miniwiggler poweronwatch} [@var{logfile}] @var{secs} @var{delay_ms} @var{serial} @var{addr} ...
+Long timestamped multi-address sampler that re-opens the device by
+@var{serial}, so it survives a physical power cycle of the board underneath
+it. Logs to @var{logfile} when one is given. Built for the same
+watchdog investigation as @command{wdtprobe}.
+@end deffn
+@end deffn
+
 @deffn {Interface Driver} {ulink}
 This is the Keil ULINK v1 JTAG debugger.
 @end deffn
