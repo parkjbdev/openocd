@@ -31,4 +31,12 @@ include %D%/drivers/Makefile.am
 	%D%/swim.h \
 	%D%/tcl.h
 
+# The ifxdap protocol library is built on top of the libusb1-based MPSSE
+# helpers in %D%/drivers/mpsse.[ch], so it needs the same USE_LIBUSB1 guard
+# they do. Every adapter capable of the TRANSPORT_IFXDAP transport is itself
+# a USB1 adapter, so this is never a limitation in practice.
+if USE_LIBUSB1
+%C%_libjtag_la_SOURCES += %D%/ifxdap.c
+endif
+
 STARTUP_TCL_SRCS += %D%/startup.tcl

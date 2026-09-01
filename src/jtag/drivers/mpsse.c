@@ -427,10 +427,7 @@ static void mpsse_purge(struct mpsse_ctx *ctx)
 {
 	int err;
 	LOG_DEBUG("-");
-	ctx->write_count = 0;
-	ctx->read_count = 0;
-	ctx->retval = ERROR_OK;
-	bit_copy_discard(&ctx->read_queue);
+	mpsse_discard_queued_commands(ctx);
 	err = libusb_control_transfer(ctx->usb_dev, FTDI_DEVICE_OUT_REQTYPE, SIO_RESET_REQUEST,
 			SIO_RESET_PURGE_RX, ctx->index, NULL, 0, ctx->usb_write_timeout);
 	if (err < 0) {
@@ -748,6 +745,25 @@ static int mpsse_rtck_config(struct mpsse_ctx *ctx, bool enable)
 	single_byte_boolean_helper(ctx, enable, 0x96, 0x97);
 
 	return ERROR_OK;
+}
+
+int mpsse_three_phase_clocking_config(struct mpsse_ctx *ctx, bool enable)
+{
+	if (!mpsse_is_high_speed(ctx))
+		return ERROR_FAIL;
+
+	LOG_DEBUG("%s", enable ? "on" : "off");
+	single_byte_boolean_helper(ctx, enable, 0x8c, 0x8d);
+
+	return ERROR_OK;
+}
+
+void mpsse_discard_queued_commands(struct mpsse_ctx *ctx)
+{
+	ctx->write_count = 0;
+	ctx->read_count = 0;
+	ctx->retval = ERROR_OK;
+	bit_copy_discard(&ctx->read_queue);
 }
 
 int mpsse_set_frequency(struct mpsse_ctx *ctx, int frequency)

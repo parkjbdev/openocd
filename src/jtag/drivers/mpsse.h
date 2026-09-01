@@ -64,7 +64,14 @@ void mpsse_loopback_config(struct mpsse_ctx *ctx, bool enable);
  * Frequency 0 means RTCK. */
 int mpsse_set_frequency(struct mpsse_ctx *ctx, int frequency);
 
+/* Enable/disable 3-phase data clocking (high-speed devices only). Some
+ * adapters/firmware can leave this enabled from a prior session; callers of
+ * custom bit-banged protocols that assume plain 2-phase clocking should
+ * explicitly disable it rather than relying on it defaulting off. */
+int mpsse_three_phase_clocking_config(struct mpsse_ctx *ctx, bool enable);
+
 /* Queue handling */
+void mpsse_discard_queued_commands(struct mpsse_ctx *ctx);
 int mpsse_flush(struct mpsse_ctx *ctx);
 
 #endif /* OPENOCD_JTAG_DRIVERS_MPSSE_H */
