@@ -15,6 +15,7 @@ all: tc2x-pflash-program.inc tc2x-dflash-program.inc \
 	tc3x-pflash-program.inc tc3x-dflash-program.inc \
 	tc4x-pflash-program.inc tc4x-dflash-program.inc \
 	tc4x-pflashcs-program.inc tc4x-dflashcs-program.inc \
+	tc4x-rram-pnvm-program.inc tc4x-rram-dnvm-program.inc \
 	tc3x-wdt-disable.inc
 
 .PHONY: all clean
@@ -50,6 +51,14 @@ tc4x-pflashcs-program.elf: aurix-flash-program.c tc4x-flash.h errors.h tricore-m
 
 tc4x-dflashcs-program.elf: aurix-flash-program.c tc4x-flash.h errors.h tricore-mmio.h tricore-flat.ld
 	$(TRICORE_CC) $(TRICORE_CFLAGS) -DTC4X_FLASH_DFLASHCS $< -o $@
+
+# TC4x RRAM (PMUR/DMUR) helper: same C source, built once per instance since
+# page size and error bits differ between program and data RRAM.
+tc4x-rram-pnvm-program.elf: aurix-rram-program.c tc4x-rram.h errors.h tricore-mmio.h tricore-flat.ld
+	$(TRICORE_CC) $(TRICORE_CFLAGS) -DTC4X_RRAM_PNVM $< -o $@
+
+tc4x-rram-dnvm-program.elf: aurix-rram-program.c tc4x-rram.h errors.h tricore-mmio.h tricore-flat.ld
+	$(TRICORE_CC) $(TRICORE_CFLAGS) -DTC4X_RRAM_DNVM $< -o $@
 
 # Per-CPU watchdog Disabled Mode helper: plain C like the other loaders
 # above, but note it still has to run as the target CPU's own code rather

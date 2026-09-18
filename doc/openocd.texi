@@ -7516,6 +7516,37 @@ OCMTS transaction service rather than issuing as direct register accesses.
 @end quotation
 @end deffn
 
+@deffn {Flash Driver} {tc4x_rram}
+Some Infineon AURIX TC4x microcontrollers replace program/data flash with
+resistive RAM (RRAM), driven by a PMUR/DMUR controller instead of the flash
+controller used by @code{tc4x_eflash}. Unlike eFlash, RRAM does not require
+erase before write. The driver reads the device geometry from the chip
+identification register and autoconfigures the bank, so the size and sector
+layout given to @command{flash bank} are ignored.
+
+@example
+flash bank $_CHIPNAME.prram0 tc4x_rram 0x80000000 0 0 0 $_TARGETNAME
+@end example
+
+By default programming is performed by a helper algorithm downloaded to target
+RAM, which requires a work area to be configured. Where that is not possible
+the driver can fall back to writing each RRAM page directly over the debug
+connection, which works without a work area but is considerably slower.
+
+@deffn {Command} {tc4x_rram fallback} bank [on|off]
+Query or set fallback mode for @var{bank}. With no argument the current setting
+is reported.
+@end deffn
+
+@deffn {Command} {tc4x_rram unlock} bank [on|off]
+Query or set write and erase permission for a UCB @var{bank}. UCB banks are
+locked by default, because a UCB write can change the device's security
+configuration; erase and write on a locked bank are skipped. Unlocking is not
+persisted, so it has to be repeated after every reset. With no argument the
+current setting is reported.
+@end deffn
+@end deffn
+
 @deffn {Flash Driver} {bluenrg-x}
 STMicroelectronics BlueNRG-1, BlueNRG-2 and BlueNRG-LP/LPS Bluetooth low energy wireless system-on-chip. They include ARM Cortex-M0/M0+ core and internal flash memory.
 The driver automatically recognizes these chips using
