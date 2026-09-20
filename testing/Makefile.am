@@ -31,4 +31,6 @@ EXTRA_DIST = \
 	examples/aurix-blinky/tc4d7/startup.S \
 	examples/aurix-blinky/tc4d7/startup-stage1.S \
 	examples/aurix-blinky/tc4d7/tc4d7.ld \
-	examples/aurix-blinky/tc4d7/tc4d7-stage1.ld
+	examples/aurix-blinky/tc4d7/tc4d7-stage1.ld \
+	valgrind/aurix-synth.cfg \
+	valgrind/aurix-synth-errors.cfg
