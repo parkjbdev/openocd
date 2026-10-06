@@ -1,0 +1,87 @@
+AURIX TC27x blinky
+==================
+
+A minimal bare-metal image for the Infineon AURIX TC275 Lite Kit, used to
+check end to end that OpenOCD can erase, program and verify the program
+flash of a TC2x device, and that the programmed image really runs from a
+cold boot with no debugger attached.
+
+CPU0 alternates LED1 (P00.5) and LED2 (P00.6) at about 1 Hz. Both LEDs are
+low active, confirmed against the official TC275 Lite Kit schematic and by
+register read-back on real hardware.
+
+Building
+--------
+
+Any TriCore ELF GCC works. Point CROSS_COMPILE at it:
+
+    make CROSS_COMPILE=/path/to/bin/tricore-elf-
+
+Flashing
+--------
+
+    openocd -s tcl -f board/infineon/kit_a1g_tc275_lite.cfg \
+            -c "program tc27x-blinky.elf verify reset exit"
+
+or simply
+
+    make CROSS_COMPILE=... flash
+
+After "reset exit" OpenOCD releases the target and the LEDs start
+blinking. Power cycling the board keeps them blinking standalone, with
+no debugger attached -- confirmed on real hardware; see "Boot Mode
+Header" below for why this needs more than just the application code.
+
+Hardware regression suite
+-------------------------
+
+../common/test-aurix-hardware.cfg is a single suite shared
+across the AURIX TC2x, TC3x and TC4x families; test-aurix-hardware-tc2x.cfg
+next to it sets the TC2x-specific overrides (including this image) and
+sources the shared suite. See that file's header comment for exactly what
+each override means and how it was derived.
+
+Build the image first, then:
+
+    openocd -s tcl -f board/infineon/kit_a1g_tc275_lite.cfg \
+            -f ../common/test-aurix-hardware-tc2x.cfg
+
+Boot Mode Header
+-----------------
+
+Unlike TC375/TC4D7 (which use a UCB-based boot mechanism, decoupled from
+the application code region), TC2x's BootROM needs a valid Boot Mode
+Header (BMHD) at 0xA0000000 to boot the flashed application standalone.
+Without one, the official TC21x/TC22x/TC23x User's Manual (chapter
+5.1.6.3) documents that the BootROM only takes "Internal Start" mode --
+the one this image needs -- when a debugger is attached and requests
+halt-after-reset; otherwise it falls back to Generic Bootstrap Loader
+mode, which never runs the flashed image at all. This was confirmed the
+hard way on real TC275 hardware: the exact same flashed bytes ran fine
+while a debugger was attached, but the board looked "dead" the moment it
+was disconnected.
+
+gen-bmhd.py generates the 32-byte header (bmhd0.bin), and bmhd.S/tc27x.ld
+place it at 0xA0000000, immediately before the application code at
+0xA0000020 -- both pulled in automatically by a normal build, so this is
+not something you need to do by hand. See gen-bmhd.py's header comment
+for the full field-by-field derivation (citing the manual's Table 5-1)
+and tc27x.ld's comment for the end-to-end explanation. Hardware-verified
+three ways: byte-exact flash readback, a live register trace showing the
+blink loop still executing, and a full debugger disconnect with the
+board owner visually confirming LED1/LED2 blinking standalone.
+
+Notes
+-----
+
+The image is linked at 0xa0000000 (the BMHD) with the application code
+at 0xa0000020, the fixed "Internal Start" entry address for this family
+(see tc27x.ld's comment and startup.S).
+
+No watchdog-disable call is needed before the application runs: a stage 1
+probe (startup-stage1.S / main-stage1.c, built with "make stage1") flashed
+a free-running counter loop with no watchdog code at all and confirmed on
+real hardware that it keeps incrementing indefinitely with no reset. See
+startup.S's comment for the full reasoning, including why no watchdog SFR
+address is guessed at here -- same finding and same approach as
+aurix-blinky/tc4d7.

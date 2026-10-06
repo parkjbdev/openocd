@@ -122,3 +122,8 @@ testing/tcl_commands/*.trs
 # Infineon examples for hardware test
 testing/examples/aurix-blinky/tc375/*.elf
 testing/examples/aurix-blinky/tc375/*.map
+testing/examples/aurix-blinky/tc27x/*.elf
+testing/examples/aurix-blinky/tc27x/*.map
+testing/examples/aurix-blinky/tc27x/bmhd0.bin
+testing/examples/aurix-blinky/tc27x/*.o
+testing/examples/aurix-blinky/recover-*.log
