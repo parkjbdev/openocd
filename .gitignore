@@ -127,3 +127,5 @@ testing/examples/aurix-blinky/tc27x/*.map
 testing/examples/aurix-blinky/tc27x/bmhd0.bin
 testing/examples/aurix-blinky/tc27x/*.o
 testing/examples/aurix-blinky/recover-*.log
+testing/examples/aurix-blinky/tc4d7/*.elf
+testing/examples/aurix-blinky/tc4d7/*.map

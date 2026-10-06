@@ -1,0 +1,58 @@
+AURIX TC4D7 blinky
+==================
+
+A minimal bare-metal image for the Infineon AURIX TC4D7 Lite Kit, used to
+check end to end that OpenOCD can erase, program and verify the program
+flash of a TC4x device, and that the programmed image really runs from a
+cold boot with no debugger attached.
+
+CPU0 alternates LED1 (P03.9) and LED2 (P03.10) at about 1 Hz.
+
+Building
+--------
+
+Any TriCore ELF GCC works. Point CROSS_COMPILE at it:
+
+    make CROSS_COMPILE=/path/to/bin/tricore-elf-
+
+Flashing
+--------
+
+    openocd -s tcl -f board/infineon/kit_a3g_tc4d7_lite.cfg \
+            -c "program tc4d7-blinky.elf verify reset exit"
+
+or simply
+
+    make CROSS_COMPILE=... flash
+
+After "reset exit" OpenOCD releases the target and the LEDs start
+blinking. Power cycling the board must keep them blinking; if they stop,
+the image was programmed but is not running from cold boot.
+
+Hardware regression suite
+-------------------------
+
+../common/test-aurix-hardware.cfg is a single suite shared
+across the AURIX TC2x, TC3x and TC4x families; test-aurix-hardware-tc4d7.cfg
+next to it sets the TC4D7-specific overrides (including this image) and
+sources the shared suite. See that file's header comment for exactly what
+each override means and how it was derived.
+
+Build the image first, then:
+
+    openocd -s tcl -f board/infineon/kit_a3g_tc4d7_lite.cfg \
+            -f ../common/test-aurix-hardware-tc4d7.cfg
+
+Notes
+-----
+
+The image is linked at 0xa0000000, this family's confirmed boot/alias
+address (see tc4d7.ld), the same role TC375's non-cached alias plays for
+that family.
+
+No watchdog-disable call is needed before the application runs: a stage 1
+probe (startup-stage1.S / main-stage1.c, built with "make stage1") flashed
+a free-running counter loop with no watchdog code at all and confirmed on
+real hardware that it keeps incrementing indefinitely with no reset. See
+startup.S's comment for the full reasoning, including why no watchdog SFR
+address is guessed at here.
