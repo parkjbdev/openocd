@@ -332,7 +332,23 @@ static int tricore_debug_entry(struct target *target)
 	uint32_t vcon0 = 0, vcon1 = 0;
 	int ret = 0;
 
-	ret = ocmts_queue_read_u32(tricore->ocmts, tricore_get_reg_addr(target, TRICORE_DBGSR), &tricore->dbgsr);
+	/*
+	 * Virtualization can be switched off while the core runs: the AURIX
+	 * startup code clears VCON0.VEN right after reset. VCON0/VCON1 then stop
+	 * answering, so trusting the virt_enabled seen at examine time turns the
+	 * first halt after that into a failed status read. TCCON bit 3 tracks
+	 * VEN and is always readable through the HRA aperture.
+	 */
+	if (tricore->version == TRICORE_1_8) {
+		uint32_t tccon;
+
+		ret = ocmts_io_read_u32(tricore->ocmts, tricore_get_reg_addr(target, TRICORE_TCCON), &tccon);
+		if (ret == ERROR_OK)
+			tricore->virt_enabled = !!(tccon & 0x8);
+	}
+
+	if (ret == ERROR_OK)
+		ret = ocmts_queue_read_u32(tricore->ocmts, tricore_get_reg_addr(target, TRICORE_DBGSR), &tricore->dbgsr);
 	if (ret == ERROR_OK)
 		ret = ocmts_queue_read_u32(tricore->ocmts, tricore_get_reg_addr(target, TRICORE_ICR), &tricore->icr);
 	if (ret == ERROR_OK && tricore->version == TRICORE_1_8 && tricore->virt_enabled) {
