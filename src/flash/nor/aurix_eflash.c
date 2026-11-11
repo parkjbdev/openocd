@@ -1360,8 +1360,24 @@ int aurix_eflash_erase(struct flash_bank *bank, unsigned int first, unsigned int
 			 * sequence error, and erases nothing. */
 			sector_count = tc2x_pflash_erase_sector_count(bank, first, last);
 		} else if (aurix_bank->tc4x) {
-			/* Limit to logical sector erase count. */
-			sector_count = MIN(aurix_bank->num_erase_sectors, last - first + 1);
+			/* aurix-mac-dap: like TC3x, never let one command cross a
+			 * physical sector boundary (512 KiB on PFLASH); the bank bases
+			 * are aligned to it. */
+			uint32_t per_phys = aurix_bank->phys_sector_size / aurix_bank->sector_size;
+			uint32_t to_boundary = per_phys - (first % per_phys);
+
+			sector_count = MIN(aurix_bank->num_erase_sectors, MIN(last - first + 1, to_boundary));
+
+			/* The completion test in aurix_eflash_handle_error() waits for
+			 * bit 31 (REQDONE in tc4x-flash.h) and only a clear-status resets
+			 * it, so clear it before every command, not just the first:
+			 * otherwise the wait for a second command returns at once while
+			 * that erase is still running. */
+			ret = aurix_eflash_clear_status(bank);
+			if (ret) {
+				LOG_ERROR("Flash erase failed: failed to clear flash status");
+				return ret;
+			}
 		} else {
 			/* Align sector count to physical sector boundary */
 			uint32_t sectors_to_boundary =
@@ -2345,8 +2361,13 @@ FLASH_BANK_COMMAND_HANDLER(tc4x_flash_bank_command)
 								   : is_dflash ? 256 * 1024 / tc4x_bank->sector_size
 											   : 512 * 1024 / tc4x_bank->sector_size;
 
-	tc4x_bank->write_timeout_ms = 10;
-	tc4x_bank->erase_timeout_ms = is_ucb ? 200 : is_dflash ? 500 : 400;
+	/* aurix-mac-dap: the series used 10 ms per burst and 400 ms per erase
+	 * command, the latter for up to 512 KiB. A timeout here is not just a
+	 * failed flash: the error path clears the status while the operation is
+	 * still running. The values are only waited out when something is wrong,
+	 * so they are generous. */
+	tc4x_bank->write_timeout_ms = 500;
+	tc4x_bank->erase_timeout_ms = is_ucb ? 200 : is_dflash ? 500 : 15000;
 
 	tc4x_bank->dflash = is_dflash;
 	tc4x_bank->dflash1 = is_dflash1;
