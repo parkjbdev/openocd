@@ -1443,8 +1443,12 @@ static int gdb_get_register_packet(struct connection *connection,
 
 	if ((reg_list_size <= reg_num) || !reg_list[reg_num] ||
 		!reg_list[reg_num]->exist || reg_list[reg_num]->hidden) {
+		/* aurix-mac-dap: answer with an error instead of dropping the connection. A
+		 * debugger front end that lists all registers otherwise ends the whole debug
+		 * session over one register the target does not provide. */
 		LOG_ERROR("gdb requested a non-existing register (reg_num=%d)", reg_num);
-		return ERROR_SERVER_REMOTE_CLOSED;
+		free(reg_list);
+		return gdb_error(connection, ERROR_FAIL);
 	}
 
 	reg_packet = calloc(DIV_ROUND_UP(reg_list[reg_num]->size, 8) * 2 + 1, 1); /* plus one for string termination null */
@@ -1503,10 +1507,11 @@ static int gdb_set_register_packet(struct connection *connection,
 
 	if ((reg_list_size <= reg_num) || !reg_list[reg_num] ||
 		!reg_list[reg_num]->exist || reg_list[reg_num]->hidden) {
+		/* aurix-mac-dap: an error reply, not a dropped connection (see above). */
 		LOG_ERROR("gdb requested a non-existing register (reg_num=%d)", reg_num);
 		free(bin_buf);
 		free(reg_list);
-		return ERROR_SERVER_REMOTE_CLOSED;
+		return gdb_error(connection, ERROR_FAIL);
 	}
 
 	if (chars != (DIV_ROUND_UP(reg_list[reg_num]->size, 8) * 2)) {

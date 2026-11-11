@@ -94,6 +94,17 @@ static const struct {
 	{.name = "psw", .addr = 0xFE04},
 	{.name = "pc", .addr = 0xFE08},
 	{.name = "icr", .addr = 0xFE2C},
+	/* aurix-mac-dap: the rest of GDB's TriCore register set (tricore-tdep.c,
+	 * features/tricore-core.xml: raw registers 38-43). GDB accepts the target
+	 * description only when "org.gnu.gdb.tricore.core" names all of them;
+	 * without these it fell back to its built-in layout, and listing the
+	 * registers asked for number 38, which did not exist here. */
+	{.name = "isp", .addr = 0xFE28},
+	{.name = "btv", .addr = 0xFE24},
+	{.name = "biv", .addr = 0xFE20},
+	{.name = "syscon", .addr = 0xFE14},
+	{.name = "pcon0", .addr = 0x920C},
+	{.name = "dcon0", .addr = 0x9040},
 };
 
 static struct reg_feature tricore_core_feature = {
