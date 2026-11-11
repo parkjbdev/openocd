@@ -1023,10 +1023,15 @@ static inline int aurix_eflash_handle_error(struct flash_bank *bank, uint32_t st
 	bool timeout_occurred = true;
 
 	while (start_time + timeout_ms > timeval_ms()) {
-		ret = ocmts_queue_read_u32(ocmts, aurix_bank->reg_addr + aurix_bank->err_offset, &flash_err);
+		/* aurix-mac-dap: status first, then the error register. The reads run
+		 * in queue order, so the error word is always sampled after the
+		 * completion it is judged with; read the other way round, an error
+		 * raised as the operation completes could read as 0 next to
+		 * REQDONE = 1, and the next clear-status would erase it unseen. */
+		ret = ocmts_queue_read_u32(ocmts, aurix_bank->reg_addr + aurix_bank->sts_offset, &flash_busy);
 		if (ret)
 			goto status_err;
-		ret = ocmts_queue_read_u32(ocmts, aurix_bank->reg_addr + aurix_bank->sts_offset, &flash_busy);
+		ret = ocmts_queue_read_u32(ocmts, aurix_bank->reg_addr + aurix_bank->err_offset, &flash_err);
 		if (ret)
 			goto status_err;
 		ret = ocmts_run(ocmts);
