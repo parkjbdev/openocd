@@ -144,6 +144,49 @@ static inline bool aurix_device_is_tc4x(uint32_t device_type)
 	return aurix_family_of(device_type) == AURIX_FAMILY_TC4XX;
 }
 
+/**
+ * User Configuration Block windows of every AURIX generation: boot mode
+ * headers, debug and flash passwords, protection and their CONFIRMED state.
+ * A bad write there cannot be undone and can lock a device for good, so this
+ * build never erases, programs or plainly writes them, whatever a
+ * configuration declares. The windows are wider than the UCBs themselves so
+ * that one table covers every derivative.
+ *
+ * Checks whether [@a addr, @a addr + @a len) touches a UCB window, in either
+ * the cached (0x8) or non-cached (0xA) segment.
+ * @return the window's name, or NULL if the range is clear of every UCB
+ */
+static inline const char *aurix_range_ucb(uint64_t addr, uint64_t len)
+{
+	static const struct {
+		uint32_t start, end;	/* [start, end) */
+		const char *name;
+	} windows[] = {
+		{ 0xAE400000, 0xAE500000, "TC4x UCB0" },
+		{ 0xAEC00000, 0xAED00000, "TC4x UCB1" },
+		{ 0xAF400000, 0xAF500000, "TC3x UCB" },
+		{ 0xAF100000, 0xAF110000, "TC2x UCB" },
+	};
+
+	if (len == 0)
+		return NULL;
+	uint64_t last = addr + len - 1;
+	/* A range that wraps or leaves the 32-bit space is never legitimate. */
+	if (last < addr || last > 0xFFFFFFFFull)
+		return "an out-of-range address";
+	for (size_t i = 0; i < sizeof(windows) / sizeof(windows[0]); i++) {
+		static const uint64_t segments[] = { 0x80000000, 0xA0000000 };
+
+		for (size_t k = 0; k < 2; k++) {
+			uint64_t s = (windows[i].start & 0x0FFFFFFF) | segments[k];
+			uint64_t e = (windows[i].end & 0x0FFFFFFF) | segments[k];
+			if (addr < e && last >= s)
+				return windows[i].name;
+		}
+	}
+	return NULL;
+}
+
 /** @returns the name of @a family, as used by 'ocmts create' ('tc2xx', ...). */
 const char *aurix_family_name(enum aurix_family family);
 

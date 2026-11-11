@@ -27,6 +27,7 @@
 #include "target/target.h"
 #include "target/target_type.h"
 
+#include "aurix.h"
 #include "ocmts.h"
 #include "tricore.h"
 #include "tricore_register.h"
@@ -979,6 +980,17 @@ int tricore_write_memory(struct target *target, target_addr_t address, uint32_t 
 	struct tricore_info *tricore = target_to_tricore(target);
 	struct ocmts *ocmts = tricore->ocmts;
 	int ret;
+
+	/* aurix-mac-dap: GDB "load", load_image and mww write here, not through a
+	 * flash driver. An ACS image carries its BMHD at UCB0 addresses, so a plain
+	 * load would aim at the UCB; refuse instead of finding out what the NVM
+	 * does with it. See aurix_range_ucb(). */
+	const char *ucb = aurix_range_ucb(address, (uint64_t)size * count);
+	if (ucb) {
+		LOG_TARGET_ERROR(target, "Refusing to write %" PRIu32 " x %" PRIu32 " bytes at 0x%08" PRIx64
+				 ": it touches %s, which this build never modifies", count, size, address, ucb);
+		return ERROR_FAIL;
+	}
 
 	/* An unaligned half-word or word write is discarded by OCMTS while still
 	 * reporting success, which silently loses data. Reject it up front. */

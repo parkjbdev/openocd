@@ -1190,6 +1190,34 @@ err:
  * they are used in the middle of a flash command sequence, and flushing
  * there would split the sequence and leave the sequencer in the wrong state.
  */
+/*
+ * aurix-mac-dap: every flash command that names a target address (erase,
+ * program, verify-erased) goes through this first. A range touching a UCB is
+ * refused before anything reaches the command interface, so neither a
+ * configuration that declares UCB banks nor an image that carries a BMHD can
+ * get one modified. See aurix_range_ucb().
+ */
+static int aurix_eflash_refuse_ucb(const char *what, uint64_t addr, uint64_t len)
+{
+	const char *ucb = aurix_range_ucb(addr, len);
+
+	if (!ucb)
+		return ERROR_OK;
+	LOG_ERROR("Refusing to %s 0x%08" PRIx64 "..0x%08" PRIx64 ": it touches %s, which this build never modifies",
+			  what, addr, addr + len - 1, ucb);
+	return ERROR_FLASH_OPERATION_FAILED;
+}
+
+/* Bytes covered by sectors [first, first + count) of @a bank. */
+static uint64_t aurix_eflash_sector_span(struct flash_bank *bank, unsigned int first, uint32_t count)
+{
+	uint64_t span = 0;
+
+	for (unsigned int i = first; i < first + count && i < bank->num_sectors; i++)
+		span += bank->sectors[i].size;
+	return span;
+}
+
 static int aurix_eflash_tc2x_endinit_values(struct ocmts *ocmts, uint32_t *unlock, uint32_t *clear,
 											uint32_t *set)
 {
@@ -1272,6 +1300,10 @@ int aurix_eflash_erase(struct flash_bank *bank, unsigned int first, unsigned int
 	struct aurix_eflash_bank *aurix_bank = bank->driver_priv;
 	struct ocmts *ocmts = target_to_tricore(bank->target)->ocmts;
 	int ret;
+
+	ret = aurix_eflash_refuse_ucb("erase bank", bank->base, bank->size);
+	if (ret)
+		return ret;
 
 	if (bank->target->state != TARGET_HALTED) {
 		LOG_ERROR("Target not halted");
@@ -1372,6 +1404,9 @@ int aurix_eflash_erase(struct flash_bank *bank, unsigned int first, unsigned int
 				goto sequence_err;
 		}
 
+		ret = aurix_eflash_refuse_ucb("erase", addr, aurix_eflash_sector_span(bank, first, sector_count));
+		if (ret)
+			goto sequence_err;
 		ret = ocmts_queue_write_u32(ocmts, aurix_bank->cmd_addr + 0xAA50, &addr);
 		if (ret)
 			goto sequence_err;
@@ -1460,6 +1495,12 @@ int aurix_eflash_erase_check(struct flash_bank *bank)
 	struct ocmts *ocmts = target_to_tricore(bank->target)->ocmts;
 	int ret;
 	size_t sector;
+
+	/* Verify-erased is not destructive, but no command sequence aimed at a
+	 * UCB is sent at all. */
+	ret = aurix_eflash_refuse_ucb("erase-check bank", bank->base, bank->size);
+	if (ret)
+		return ret;
 
 	if (bank->target->state != TARGET_HALTED) {
 		LOG_ERROR("Target not halted");
@@ -1720,6 +1761,11 @@ static int aurix_eflash_write_algo(struct flash_bank *bank, uint32_t address, co
 	const uint8_t *code;
 	size_t code_size;
 
+	/* Last host-side check before the on-target loader is handed the range. */
+	ret = aurix_eflash_refuse_ucb("program", address, bytes);
+	if (ret)
+		return ret;
+
 	/*
 	 * Select the loader variant matching this bank's family (TC2x and TC3x
 	 * have a single command interface; TC4x has one per module, "cs" being
@@ -1792,6 +1838,12 @@ static int aurix_eflash_write(struct flash_bank *bank, const uint8_t *buffer, ui
 	struct ocmts *ocmts = target_to_tricore(bank->target)->ocmts;
 	uint32_t page_offset = 0;
 	int ret;
+
+	ret = aurix_eflash_refuse_ucb("program bank", bank->base, bank->size);
+	if (ret == ERROR_OK)
+		ret = aurix_eflash_refuse_ucb("program", (uint64_t)bank->base + offset, count);
+	if (ret)
+		return ret;
 
 	/* Same reason as in aurix_eflash_erase(): "program" resets the target
 	 * between the erase and the write, which re-arms the safety watchdog, and
@@ -1904,6 +1956,9 @@ fallback:
 		}
 
 		/* Execute page write sequence */
+		ret = aurix_eflash_refuse_ucb("program", addr, copy_size);
+		if (ret)
+			goto err;
 		ret = ocmts_queue_write_u32(ocmts, aurix_bank->cmd_addr + 0xAA50, &addr);
 		if (ret)
 			goto err;
