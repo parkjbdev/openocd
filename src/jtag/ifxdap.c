@@ -761,7 +761,30 @@ int ifxdap_read_ioinfo(struct ifxdap_ctx *ctx, uint16_t *out)
 	return 0;
 }
 
+#define IFXDAP_RESET_PULSE_MS 20
+
+static int ifxdap_connect_seq(struct ifxdap_ctx *ctx, uint32_t slow_hz, uint32_t fast_hz, bool with_reset);
+
 int ifxdap_connect(struct ifxdap_ctx *ctx, uint32_t slow_hz, uint32_t fast_hz)
+{
+	/*
+	 * AURIX_DAP_ATTACH set: connect without the hardware reset. The DAP
+	 * handshake works on a chip whose debug interface is already up (any
+	 * earlier session since power-on), and the application keeps running;
+	 * with the reset every start of OpenOCD rebooted the board. When the
+	 * handshake fails, start again without the variable.
+	 */
+	const char *attach = getenv("AURIX_DAP_ATTACH");
+
+	return ifxdap_connect_seq(ctx, slow_hz, fast_hz, !attach || !*attach);
+}
+
+int ifxdap_connect_reset(struct ifxdap_ctx *ctx, uint32_t slow_hz, uint32_t fast_hz)
+{
+	return ifxdap_connect_seq(ctx, slow_hz, fast_hz, true);
+}
+
+static int ifxdap_connect_seq(struct ifxdap_ctx *ctx, uint32_t slow_hz, uint32_t fast_hz, bool with_reset)
 {
 	/* Force plain 2-phase MPSSE clocking. A prior tool session (e.g.
 	 * Infineon's own DAS/TAS tooling) may have left the FTDI chip in
@@ -771,11 +794,20 @@ int ifxdap_connect(struct ifxdap_ctx *ctx, uint32_t slow_hz, uint32_t fast_hz)
 	/* Step 1: test reset + slow clock + hardware reset */
 	ifxdap_test_reset(ctx);
 	ifxdap_set_clk_freq(ctx, slow_hz);
-	ifxdap_reset(ctx);
+	if (with_reset)
+		ifxdap_reset(ctx);
 	if (ifxdap_exec(ctx) < 0) {
 		ifxdap_release_reset(ctx);
 		return -1;
 	}
+	/*
+	 * Hold the reset. Released in the very next USB transaction (about a
+	 * millisecond later) the reset was not dependable: measured on a TC4D7,
+	 * the halt after reset request below was missed in one reset out of three
+	 * or four and the application ran. With 20 ms: 24 clean halts out of 24.
+	 */
+	if (with_reset)
+		usleep(IFXDAP_RESET_PULSE_MS * 1000);
 
 	/*
 	 * Release reset as its own isolated USB transaction, then give the
@@ -870,9 +902,17 @@ int ifxdap_connect(struct ifxdap_ctx *ctx, uint32_t slow_hz, uint32_t fast_hz)
 		}
 	}
 
-	/* Step 3: Configure IO client for full access */
+	/*
+	 * Step 3: Configure IO client for full access. Bit 1 - the halt after
+	 * reset request, it reads back as CBS_OSTATE.HARR - stays set: step 2 set
+	 * it (0x503), and clearing it here (0x4501) took the request away again
+	 * before the boot firmware had looked at it. The firmware arms a trigger
+	 * on the start address and the core halts there before its first
+	 * instruction; the target layer withdraws the request afterwards
+	 * (tricore_init_debug_access()) and resumes the core for "reset run".
+	 */
 	ifxdap_set_io_client(ctx, 1);
-	ifxdap_write_ojconf(ctx, 0x4501);
+	ifxdap_write_ojconf(ctx, 0x4503);
 	ifxdap_writereg_0(ctx, 0xC1);
 	if (ifxdap_exec(ctx) < 0) {
 		ifxdap_release_reset(ctx);

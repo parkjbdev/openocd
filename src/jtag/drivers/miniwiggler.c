@@ -77,6 +77,7 @@ static struct ifxdap_ctx *g_dap;
 /* Set once the DAP handshake has completed in this process, so diagnostics
  * can connect on demand without redoing it after every 'ocmts init' failure. */
 static bool g_dap_connected;
+static bool g_is_tc4x; /* set by the first connect; the reset repeats its key exchange */
 
 /*
  * Operation queue: we accumulate mw_op entries during queue_io_* calls,
@@ -176,7 +177,8 @@ static int mw_op_connect(struct ocmts *ocmts)
 	 * TC3x/TC2xx device types are unaffected -- this is a no-op for them.
 	 */
 	uint32_t dev_type = aurix_tap_device_type(ocmts->tap);
-	if (aurix_device_is_tc4x(dev_type)) {
+	g_is_tc4x = aurix_device_is_tc4x(dev_type);
+	if (g_is_tc4x) {
 		LOG_INFO("miniwiggler: TC4x detected, running COMDATA key exchange");
 		if (ifxdap_tc4x_key_exchange(g_dap, 0, mw_tc4x_default_key,
 					ARRAY_SIZE(mw_tc4x_default_key)) < 0)
@@ -512,8 +514,19 @@ static int mw_adapter_reset(int srst, int trst)
 	 * here; do not change that behaviour in this sweep.
 	 */
 	if (srst || trst) {
-		if (ifxdap_reset_and_run(g_dap, MW_SLOW_HZ, MW_FAST_HZ) < 0)
+		/*
+		 * The connect sequence, with its reset: measured on a TC4D7, it
+		 * leaves the core halted on its first instruction every time (12 of
+		 * 12, from a running application), while ifxdap_reset_and_run() let
+		 * the application run first in about one reset out of four - a
+		 * visible boot before the target layer got its halt. The target
+		 * layer resumes the core for "reset run".
+		 */
+		if (ifxdap_connect_reset(g_dap, MW_SLOW_HZ, MW_FAST_HZ) < 0)
 			return ERROR_FAIL;
+		if (g_is_tc4x && ifxdap_tc4x_key_exchange(g_dap, 0, mw_tc4x_default_key,
+					ARRAY_SIZE(mw_tc4x_default_key)) < 0)
+			LOG_DEBUG("miniwiggler: TC4x key exchange after reset failed");
 	}
 	return ERROR_OK;
 }

@@ -241,6 +241,9 @@ int ifxdap_clear_error(struct ifxdap_ctx *ctx);
  */
 int ifxdap_connect(struct ifxdap_ctx *ctx, uint32_t slow_hz, uint32_t fast_hz);
 
+/** ifxdap_connect() that always resets the chip (AURIX_DAP_ATTACH is ignored). */
+int ifxdap_connect_reset(struct ifxdap_ctx *ctx, uint32_t slow_hz, uint32_t fast_hz);
+
 /**
  * Hardware reset with the CPU released to run freely (OJCONF HARR bit
  * clear), instead of the halt-on-reset performed by ifxdap_connect().

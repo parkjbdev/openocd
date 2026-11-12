@@ -399,6 +399,21 @@ static int tricore_init_debug_access(struct target *target)
 	struct tricore_info *tricore = target_to_tricore(target);
 	int ret = 0;
 
+	/*
+	 * The adapter's reset leaves the halt after reset request set (OJCONF
+	 * bit 1, CBS_OSTATE.HARR) so that the boot firmware cannot miss it. By
+	 * now it has done its job; withdraw it, or the next reset the chip makes
+	 * itself (software reset, watchdog) would end in the boot firmware's
+	 * wait-for-the-debugger loop instead of the application.
+	 */
+	if (target->coreid == 0) {
+		ret = tricore->ocmts->ops->queue_io_set_ojconf(tricore->ocmts, 0x0501);
+		if (ret == ERROR_OK)
+			ret = tricore->ocmts->ops->run(tricore->ocmts);
+		if (ret != ERROR_OK)
+			LOG_TARGET_WARNING(target, "could not withdraw the halt after reset request");
+	}
+
 	if (tricore->version == TRICORE_1_8) {
 		uint32_t tccon;
 		ret = ocmts_io_read_u32(tricore->ocmts, tricore_get_reg_addr(target, TRICORE_TCCON), &tccon);
