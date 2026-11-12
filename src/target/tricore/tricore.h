@@ -142,6 +142,16 @@ struct tricore_info {
 	bool suspended;
 	bool halted;
 
+	/*
+	 * Boot halt (BOOTCON.BHALT on TC1.8, SYSCON.BHALT before): the core has
+	 * not been started by CPU0's startup code yet. Such a core reads as
+	 * halted until a debugger resumes it; from then on it reads as running
+	 * (it will run as soon as it is started) until it really halts, or until
+	 * a halt request takes it back.
+	 */
+	bool bhalt;
+	bool bhalt_released;
+
 	uint32_t *algorithm_context;
 	unsigned int algorithm_context_regs;
 	enum target_debug_reason algorithm_debug_reason;

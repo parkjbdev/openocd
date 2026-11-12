@@ -415,6 +415,23 @@ static int tricore_init_debug_access(struct target *target)
 		}
 	}
 
+	/*
+	 * TC1.8 moved the trigger action out of TRxEVT (bit 0 is only "enable"
+	 * there) into DBGACT, shared by all triggers of the core. With
+	 * DBGACT.EVTA = 0 a trigger does nothing at all: breakpoints and the
+	 * range trigger used for single-stepping never halt the core. The boot
+	 * firmware sets DBGACT = 0x12 (EVTA = halt, SUSP) on CPU0 for halt after
+	 * reset, which is why CPU0 worked and CPU1..5 did not (seen on a TC4D7:
+	 * same TRxEVT/TRxADR, TRIG_ACC stays 0 until DBGACT is set).
+	 */
+	if (tricore->version == TRICORE_1_8) {
+		ret = ocmts_io_write_u32(tricore->ocmts, tricore_get_reg_addr(target, TRICORE_DBGACT), 0x12);
+		if (ret) {
+			LOG_TARGET_ERROR(target, "Failed to set the debug action");
+			return ret;
+		}
+	}
+
 	/* Set debug instruction event trigger */
 	ret = ocmts_io_write_u32(tricore->ocmts, tricore_get_reg_addr(target, TRICORE_SWEVT),
 							 tricore->version == TRICORE_1_8 ? 0x9 : 0xA);
@@ -492,7 +509,11 @@ static int tricore_poll(struct target *target)
 	 * OpenOCD's point of view, and testing it made every resume look like it
 	 * had failed.
 	 */
-	if ((tricore->dbgsr & TRICORE_DBGSR_HALT) || bhalt) {
+	tricore->bhalt = bhalt;
+	if (!bhalt)
+		tricore->bhalt_released = false;
+
+	if ((tricore->dbgsr & TRICORE_DBGSR_HALT) || (bhalt && !tricore->bhalt_released)) {
 		LOG_TARGET_DEBUG(target, "Target is halted DGBSR: 0x%08x BHALT: %d", tricore->dbgsr, bhalt);
 		target->state = TARGET_HALTED;
 
@@ -539,6 +560,10 @@ int tricore_halt(struct target *target)
 		LOG_TARGET_DEBUG(target, "target already halted");
 		return ERROR_OK;
 	}
+
+	/* A core that has not been started yet is as good as halted. */
+	if (tricore->bhalt)
+		tricore->bhalt_released = false;
 
 	/*
 	 * Halt by writing DBGSR.HALT. The adapter must not intercept this: an
@@ -601,6 +626,15 @@ int tricore_resume(struct target *target, bool current, target_addr_t address, b
 		LOG_TARGET_ERROR(target, "Failed to continue target");
 		return ret;
 	}
+
+	/*
+	 * A boot-halted core stays halted until CPU0 starts it; it must not read
+	 * as halted meanwhile, or every resume would be answered by a stop at
+	 * once. Its breakpoints are armed already and take effect from its first
+	 * instruction.
+	 */
+	if (tricore->bhalt)
+		tricore->bhalt_released = true;
 
 	/* registers are now invalid */
 	register_cache_invalidate(target->reg_cache);
@@ -797,6 +831,8 @@ int tricore_deassert_reset(struct target *target)
 {
 	struct tricore_info *tricore = target_to_tricore(target);
 	int ret;
+
+	tricore->bhalt_released = false;
 
 	if (target->coreid == 0 && target->reset_halt) {
 		/* Set HAAR bit before releasing the reset. */
